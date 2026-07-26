@@ -1,0 +1,16 @@
+{:itonami.blueprint/id "cloud-itonami-marketplace-settlement"
+ :itonami.blueprint/name "Federated Marketplace Multi-Seller Settlement"
+ :itonami.blueprint/domain :marketplace/settlement-payout
+ :itonami.blueprint/license "AGPL-3.0-or-later"
+ :itonami.blueprint/social-impact [:small-seller-access :transparency :data-sovereignty]
+ :itonami.blueprint/governor :settlement-governor
+ :itonami.blueprint/robotics false
+ :itonami.blueprint/required-technologies [:identity :forms :audit-ledger :payments]
+ :itonami.blueprint/optional-technologies []
+ :itonami.blueprint/status :public-oss
+ :itonami.blueprint/maturity :implemented
+ :itonami.blueprint/keying :function
+ :itonami.blueprint/adr "2607264000-marketplace-federated-commerce-layer"
+ ;; This actor computes allocations. It holds no funds and no keys —
+ ;; kotoba-lang/pay's zero-custody boundary is preserved all the way up.
+ :itonami.blueprint/custodial false}
