@@ -1,0 +1,184 @@
+(ns settleops.rail-test
+  "The rail adapter. Every HTTP call in these tests goes to a recording
+  stub — nothing here has ever reached a real rail."
+  (:require [clojure.test :refer [deftest is testing]]
+            [marketplace.settlement :as settle]
+            [settleops.rail :as rail]
+            [settleops.rail.client :as client]
+            [settleops.store :as store]))
+
+(defn- released-escrow
+  "A properly authorised release: :released, with a named releaser."
+  ([] (released-escrow "treasury-01"))
+  ([by]
+   (let [st (store/seed-db)
+         plan (store/plan-for st "basket-1")]
+     {:escrow/id "esc-1" :escrow/plan plan :escrow/basket "basket-1"
+      :escrow/state :released :escrow/released-by by})))
+
+(defn- dests []
+  {"merchant.alpha" (settle/payout-destination
+                     {:seller "merchant.alpha" :rail :x402 :address "0xaaa" :verified? true})
+   "merchant.beta"  (settle/payout-destination
+                     {:seller "merchant.beta" :rail :stripe :address "acct_beta" :verified? true})})
+
+;; ───────────────────── instructions ─────────────────────
+
+(deftest the-two-rails-are-genuinely-different-shapes
+  (let [insts (rail/instructions-for (released-escrow) (dests))
+        by-seller (into {} (map (juxt :instruction/seller identity) insts))]
+    (is (= 2 (count insts)))
+    (testing "x402: the buyer pays the seller's treasury directly, so the
+              operator is never in the path"
+      (let [i (by-seller "merchant.alpha")]
+        (is (= :direct-split (:instruction/kind i)))
+        (is (false? (:instruction/custodial? i)))))
+    (testing "stripe: funds passed through the platform, so this is a real transfer"
+      (let [i (by-seller "merchant.beta")]
+        (is (= :transfer (:instruction/kind i)))
+        (is (true? (:instruction/custodial? i)))))))
+
+(deftest amounts-come-from-the-plan-not-recomputed
+  (let [e (released-escrow)
+        insts (rail/instructions-for e (dests))]
+    (is (= (mapv :alloc/seller-payout-minor (get-in e [:escrow/plan :plan/allocations]))
+           (mapv :instruction/amount-minor insts)))
+    (is (true? (rail/conserved? e insts)))))
+
+(deftest conservation-is-checked-again-at-the-last-point-before-a-rail
+  (testing "a leak from a bad destination lookup or a dropped allocation
+            would otherwise be invisible until a seller complained"
+    (let [e (released-escrow)
+          insts (rail/instructions-for e (dests))]
+      (is (false? (rail/conserved? e (butlast insts))))
+      (is (false? (rail/conserved? e (assoc-in (vec insts) [0 :instruction/amount-minor] 1)))))))
+
+(deftest a-held-escrow-has-no-instructions
+  (let [e (assoc (released-escrow) :escrow/state :held)]
+    (is (nil? (rail/instructions-for e (dests))))))
+
+(deftest an-unattributed-release-produces-no-instructions
+  (testing "producing instructions from a release with no named human
+            would launder a missing signature into a payment"
+    (is (nil? (rail/instructions-for (released-escrow "") (dests))))
+    (is (nil? (rail/instructions-for (dissoc (released-escrow) :escrow/released-by)
+                                     (dests))))))
+
+(deftest instruction-validation
+  (let [i (first (rail/instructions-for (released-escrow) (dests)))]
+    (is (empty? (rail/instruction-errors i)))
+    (is (seq (rail/instruction-errors (assoc i :instruction/to ""))))
+    (is (seq (rail/instruction-errors (assoc i :instruction/rail :carrier-pigeon))))
+    (is (seq (rail/instruction-errors (assoc i :instruction/amount-minor -1))))))
+
+;; ───────────────────── reconciliation ─────────────────────
+
+(deftest reconcile-reports-over-payment-as-loudly-as-under
+  (let [insts (rail/instructions-for (released-escrow) (dests))
+        [a b] (mapv :instruction/amount-minor insts)
+        rows (rail/reconcile insts {"merchant.alpha" a "merchant.beta" (inc b)})]
+    (is (= :settled (:status (first (filter #(= "merchant.alpha" (:seller %)) rows)))))
+    (is (= :over (:status (first (filter #(= "merchant.beta" (:seller %)) rows))))
+        "a seller receiving more than the plan says is as much a defect —
+         silently accepting it hides a double payment")
+    (is (false? (rail/fully-settled? rows)))
+    (is (= 1 (count (rail/unsettled rows))))))
+
+(deftest a-seller-the-rail-has-no-record-of-is-missing-not-zero
+  (let [insts (rail/instructions-for (released-escrow) (dests))
+        rows (rail/reconcile insts {})]
+    (is (every? #(= :missing (:status %)) rows))
+    (is (every? #(nil? (:observed %)) rows) "nil, not 0 — different facts")))
+
+(deftest a-clean-reconciliation
+  (let [insts (rail/instructions-for (released-escrow) (dests))
+        observed (into {} (map (juxt :instruction/seller :instruction/amount-minor) insts))]
+    (is (true? (rail/fully-settled? (rail/reconcile insts observed))))
+    (is (empty? (rail/unsettled (rail/reconcile insts observed))))))
+
+;; ───────────────────── the client cannot move money by itself ─────────────────────
+
+(defn- recorder
+  "A stub http fn that records what it was asked to do and never leaves
+  the process."
+  [a resp]
+  (fn [req] (swap! a conj req) resp))
+
+(deftest x402-is-read-only
+  (let [calls (atom [])
+        http (recorder calls {:status 200 :body {:settlements [{:amount-minor 1080}]}})
+        insts (rail/instructions-for (released-escrow) (dests))
+        observed (client/fetch-observed http insts {})]
+    (is (= {"merchant.alpha" 1080} observed))
+    (is (= 1 (count @calls)) "only the x402 seller is queried")
+    (is (= :get (:method (first @calls))) "GET — nexus-x402 has no send endpoint")
+    (is (re-find #"/admin/settlements/merchant\.alpha" (:url (first @calls))))))
+
+(deftest execute-refuses-an-x402-instruction-outright
+  (testing "there is nothing to execute: the buyer already paid the
+            seller's treasury directly"
+    (let [i (first (filter #(= :x402 (:instruction/rail %))
+                           (rail/instructions-for (released-escrow) (dests))))
+          r (client/execute-transfer! nil {:instruction i :execute? true
+                                           :authorised-by "treasury-01"})]
+      (is (= :rail-has-no-send-endpoint (:refused r))))))
+
+(deftest the-default-is-a-dry-run
+  (let [calls (atom [])
+        http (recorder calls {:status 200 :body {}})
+        i (first (filter #(= :stripe (:instruction/rail %))
+                         (rail/instructions-for (released-escrow) (dests))))
+        r (client/execute-transfer! http {:instruction i :authorised-by "treasury-01"})]
+    (is (true? (:dry-run? r)))
+    (is (empty? @calls) "building the request and sending it are different acts")
+    (is (= 2970 (:would-transfer r)))
+    (is (= "acct_beta" (:to r)))))
+
+(deftest execute-refuses-without-a-named-human
+  (let [i (first (filter #(= :stripe (:instruction/rail %))
+                         (rail/instructions-for (released-escrow) (dests))))]
+    (is (= :no-named-authoriser
+           (:refused (client/execute-transfer! nil {:instruction i :execute? true}))))
+    (is (= :no-named-authoriser
+           (:refused (client/execute-transfer! nil {:instruction i :execute? true
+                                                    :authorised-by "  "}))))))
+
+(deftest execute-refuses-an-invalid-instruction-and-a-repeat
+  (let [i (first (filter #(= :stripe (:instruction/rail %))
+                         (rail/instructions-for (released-escrow) (dests))))]
+    (is (= :invalid-instruction
+           (:refused (client/execute-transfer! nil {:instruction (assoc i :instruction/to "")
+                                                    :execute? true :authorised-by "x"}))))
+    (is (= :already-executed
+           (:refused (client/execute-transfer!
+                      nil {:instruction (assoc i :instruction/executed? true)
+                           :execute? true :authorised-by "x"}))))))
+
+(deftest execute-refuses-with-no-injected-client
+  (testing "there is no ambient HTTP capability to fall back on"
+    (let [i (first (filter #(= :stripe (:instruction/rail %))
+                           (rail/instructions-for (released-escrow) (dests))))]
+      (is (= :no-http-client
+             (:refused (client/execute-transfer! nil {:instruction i :execute? true
+                                                      :authorised-by "treasury-01"})))))))
+
+(deftest a-fully-authorised-transfer-builds-a-correct-idempotent-request
+  (let [calls (atom [])
+        http (recorder calls {:status 200 :body {:id "tr_1"}})
+        i (first (filter #(= :stripe (:instruction/rail %))
+                         (rail/instructions-for (released-escrow) (dests))))
+        r (client/execute-transfer! http {:instruction i :execute? true
+                                          :authorised-by "treasury-01"
+                                          :secret "sk_test"})]
+    (is (true? (:executed? r)))
+    (is (= "treasury-01" (:authorised-by r)))
+    (let [req (first @calls)]
+      (is (= :post (:method req)))
+      (is (re-find #"/transfers$" (:url req)))
+      (testing "a retry after a timeout cannot pay twice"
+        (is (= "mp-esc-1-merchant.beta" (get (:headers req) "idempotency-key"))))
+      (testing "the transfer is traceable back to the release that justified it"
+        (is (re-find #"transfer_group=esc-1" (:body req))))
+      (is (re-find #"amount=2970" (:body req)))
+      (is (re-find #"currency=jpy" (:body req)))
+      (is (re-find #"destination=acct_beta" (:body req))))))

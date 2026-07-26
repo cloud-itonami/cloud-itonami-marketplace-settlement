@@ -95,9 +95,55 @@ established (ADR-2607264000 D5): *no actor adjudicates.*
 Both the governor's `always-escalate-ops` and every phase's `:auto` set
 enforce this independently — two layers, not one.
 
+## The rail adapter, and what x402 actually is
+
+`settleops.rail` turns an authorised release into rail instructions —
+and building it surfaced a design fact worth stating plainly.
+
+**`nexus-x402` is a facilitator, not a payout rail.** Its own README:
+*the facilitator holds no keys*, and payments settle *to each seller's
+own treasury*. Its admin surface is `PUT /admin/sellers/<seller>` and
+`GET /admin/settlements/<seller>`. There is no endpoint that sends
+money, by design.
+
+That is not a gap to work around — it means the two rails are genuinely
+different shapes:
+
+| Rail | Kind | Custodial? | What a release means |
+|---|---|---|---|
+| x402 | `:direct-split` | no | the buyer already paid each seller's treasury directly; the job is **reconciliation** |
+| Stripe | `:transfer` | yes | funds passed through the platform; the job is a **Connect transfer** |
+
+`execute-transfer!` refuses an x402 instruction outright, because there
+is nothing to execute. Inventing an x402 `POST /transfer` would have
+produced code that looks finished and fails in production.
+
+`reconcile` reports `:over` as loudly as `:short` — a seller receiving
+more than the plan says is as much a defect, and silently accepting it
+hides a double payment. A seller the rail has no record of is
+`:missing`, not zero; those are different facts.
+
+### The client cannot move money by itself
+
+- **No ambient HTTP.** Every network function takes an `http` function
+  as an argument. The namespace requires no client and opens no socket.
+- **Dry run by default.** `execute-transfer!` returns the request it
+  *would* have sent unless `:execute? true` is passed explicitly.
+  Building a request and sending it are different acts.
+- **A named human, always.** No `:authorised-by` → `:no-named-authoriser`.
+- **Idempotent.** The `Idempotency-Key` is derived from escrow + seller,
+  so a retry after a timeout cannot pay twice, and `:transfer_group`
+  traces every transfer back to the release that justified it.
+- **Conservation re-checked** at the last point before a rail, on top of
+  the plan's own check — a leak from a bad destination lookup would
+  otherwise be invisible until a seller complained.
+
+Every test injects a recording stub. **No transfer has been executed
+from this repository.**
+
 ```bash
 clojure -M:dev:run   # multi-seller split, blocked destination, human-gated release
-clojure -M:test      # 30 tests, 87 assertions
+clojure -M:test      # 46 tests, 134 assertions
 clojure -M:lint
 ```
 
