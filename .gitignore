@@ -1,5 +1,5 @@
-target/
+node_modules/
+dist/
+dist-actor/
+.shadow-cljs/
 .cpcache/
-*.swp
-*~
-.DS_Store

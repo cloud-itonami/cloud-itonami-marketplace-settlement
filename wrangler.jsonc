@@ -1,0 +1,23 @@
+{
+  "name": "cloud-itonami-marketplace-settlement",
+  "main": "dist/worker.js",
+  "compatibility_date": "2026-07-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true }
+  // No storage binding. This host talks to kotobase.net through
+  // kotoba-lang/kotobase-client, so authorization, tenant isolation and
+  // replay protection are the service's rather than this Worker's.
+  //
+  // Every marketplace actor writes into ONE shared ref ("marketplace"),
+  // because a kotobase Datalog join reaches exactly one ref and these
+  // documents are meant to be joined -- an order against the credential
+  // that admitted its seller, a payout against the delivery that earned it.
+  //
+  // Secrets (`wrangler secret put`), never placed here:
+  //   KOTOBASE_SECRET_KEY  the Ed25519 seed the client mints a CACAO from.
+  //                        Shared across the marketplace actors because
+  //                        :apex requires graph scope == issuer DID and they
+  //                        share the graph; per-actor attribution comes from
+  //                        marketplace.persist's per-actor ledger streams.
+  //   ACTOR_WRITE_TOKEN    gates the write routes. Reads are open.
+}

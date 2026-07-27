@@ -22,7 +22,8 @@
   and carries `:plan/custodial? false` to say so on the record itself.
 
   The ledger stays append-only."
-  (:require [marketplace.settlement :as settle]))
+  (:require [marketplace.settlement :as settle]
+            [marketplace.persist :as persist]))
 
 (defprotocol Store
   (payout-destination [s seller-id] "Verified payout destination, or nil.")
@@ -39,6 +40,7 @@
   (settlement-log [s])
   (commit-record! [s record])
   (append-ledger! [s fact])
+  (durable? [s] "False for the test-only memory backend.")
   (with-delivery [s basket-id delivered?]))
 
 ;; ----------------------------- demo data -----------------------------
@@ -102,6 +104,7 @@
   (operator [_] (:operator @a))
   (ledger [_] (:ledger @a))
   (settlement-log [_] (:settlement-log @a))
+  (durable? [_] false)
   (commit-record! [_ record]
     (swap! a update :settlement-log conj record)
     ;; `:payload` is where `settleops.operation`'s :request-approval node
@@ -166,3 +169,95 @@
                    (when-let [d (payout-destination s seller)]
                      [seller d]))
                  (map :alloc/seller (:plan/allocations plan*)))))
+
+;; ----------------------------- durable store -----------------------------
+
+(defrecord KotobaseStore [st seed]
+  Store
+  (payout-destination [_ id] (persist/get-doc (persist/ctx st :payout :payout/seller) id))
+  (all-payout-destinations [_] (persist/all-docs (persist/ctx st :payout :payout/seller)))
+  (basket [_ id] (:basket/lines (persist/get-doc (persist/ctx st :basket :basket/id) id)))
+  (all-baskets [_]
+    (into {} (map (juxt :basket/id :basket/lines)
+                  (persist/all-docs (persist/ctx st :basket :basket/id)))))
+  (plan [_ id] (:plan/value (persist/get-doc (persist/ctx st :plan :basket/id) id)))
+  (escrow [_ id] (persist/get-doc (persist/ctx st :escrow :escrow/id) id))
+  (all-escrows [_] (persist/all-docs (persist/ctx st :escrow :escrow/id)))
+  ;; Delivery is the fulfilment side's fact, mirrored here as its own
+  ;; document rather than folded into the plan -- settlement re-checks it
+  ;; independently before releasing anything, and a flag living inside
+  ;; the thing it gates would not be an independent check.
+  (delivered? [_ id]
+    (boolean (:delivered (persist/get-doc (persist/ctx st :delivery :id) (str id)))))
+  (fee-schedule [_] (:config/value (persist/get-doc (persist/ctx st :config :config/id) "fee-schedule")))
+  (operator [_] (:config/value (persist/get-doc (persist/ctx st :config :config/id) "operator")))
+  (durable? [_] (not (:persist/memory? st)))
+  (ledger [_] (persist/read-events (persist/stream-ctx st :ledger)))
+  (settlement-log [_] (persist/read-events (persist/stream-ctx st :settlement-log)))
+  (commit-record! [this record]
+    (persist/append-event! (persist/stream-ctx st :settlement-log) seed record)
+    ;; `:payload` is where the :request-approval node stamps
+    ;; `:approved-by`; `:value` is the advisor's own payload and never
+    ;; carries it. Reading the approver from :value would silently
+    ;; record every release as unattributed.
+    (let [{:keys [op value payload]} record]
+      (case op
+        :bind-payout-destination
+        (when-let [d (:destination value)]
+          (persist/put-doc! (persist/ctx st :payout :payout/seller) d))
+
+        :plan-settlement
+        (when-let [p (:plan value)]
+          (persist/put-doc! (persist/ctx st :plan :basket/id)
+                            {:basket/id (:basket-id value) :plan/value p}))
+
+        :open-escrow
+        (when-let [e (:escrow value)]
+          (persist/put-doc! (persist/ctx st :escrow :escrow/id) e))
+
+        ;; A release NEVER moves money here. It records that a human
+        ;; authorised one; a rail adapter reads the released escrow and
+        ;; performs the transfer outside this actor.
+        :propose-release
+        (when-let [e (escrow this (:escrow-id value))]
+          (persist/put-doc! (persist/ctx st :escrow :escrow/id)
+                            (assoc e :escrow/state :released
+                                   :escrow/released-by (:approved-by payload))))
+
+        nil))
+    record)
+  (append-ledger! [_ fact]
+    (persist/append-event! (persist/stream-ctx st :ledger) seed fact))
+  (with-delivery [this id d?]
+    (persist/put-doc! (persist/ctx st :delivery :id)
+                      {:id (str id) :delivered (boolean d?)})
+    this))
+
+(defn kotobase-store
+  "A durable store over a HOST-INJECTED database API. Throws when the
+  host has not wired one, per
+  `:policy/fail-closed-without-host-injection`."
+  [{:keys [db-api seq-fn]}]
+  (->KotobaseStore (persist/store {:db-api db-api :actor "settleops"})
+                   (or seq-fn (let [n (atom 0)] #(swap! n inc)))))
+
+(defn put-basket!
+  "Mirror an order's basket lines so a plan can be computed against them.
+
+  Written by whoever observes the order (the order actor's projection
+  `marketplace.order/->basket-lines`), never invented here -- a
+  settlement that could author its own basket could author its own
+  payout."
+  [s basket-id lines]
+  (persist/put-doc! (persist/ctx (:st s) :basket :basket/id)
+                    {:basket/id basket-id :basket/lines (vec lines)})
+  lines)
+
+(defn put-config!
+  "The operator's fee schedule and payout identity. Operator input, not
+  an actor decision: a commission rate this actor chose for itself would
+  be a conflict of interest written into code."
+  [s k v]
+  (persist/put-doc! (persist/ctx (:st s) :config :config/id)
+                    {:config/id (name k) :config/value v})
+  v)
