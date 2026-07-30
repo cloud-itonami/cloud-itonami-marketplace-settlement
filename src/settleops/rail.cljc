@@ -26,6 +26,18 @@
   otherwise — inventing an x402 `POST /transfer` that does not exist —
   would produce code that looks finished and fails in production.
 
+  ## And a third rail that is not a payout rail at all
+
+  コード決済 (QR / barcode code payment) is the OTHER direction: buyer →
+  platform. `marketplace.acceptance` models it, and a code-payment PSP
+  settles to ONE merchant's bank account, so it can never be a per-seller
+  payout destination — the seller's share leaves that bank account as a
+  `:bank-transfer`. `non-payout-rails` refuses it BY NAME here rather
+  than letting it read as an unknown rail, because the next person to
+  see `:unknown-rail` for `:code-payment` will reasonably try to fix it
+  by adding an entry to `rail->kind`, which is the exact mistake this
+  refusal exists to stop.
+
   ## Nothing here moves money
 
   This namespace is pure: it builds instruction records and compares
@@ -35,6 +47,7 @@
 
   Pure: no clock, no network, no randomness."
   (:require [clojure.string :as str]
+            [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]))
 
 ;; ───────────────────────── instructions ─────────────────────────
@@ -53,6 +66,13 @@
   {:x402          :direct-split
    :stripe        :transfer
    :bank-transfer :transfer})
+
+(def non-payout-rails
+  "Rails money can arrive ON but never be paid out over. These belong to
+  `marketplace.acceptance`, and `acceptance/payout-leg-rail` says which
+  payout rail carries the seller's share instead. Kept as data so the
+  refusal below can name the rail rather than shrug at it."
+  #{:code-payment})
 
 (defn instruction-kind
   "Which shape a rail takes. nil for an unknown rail."
@@ -102,9 +122,20 @@
   [i]
   (vec
    (concat
-    (when-not (contains? settle/payout-rails (:instruction/rail i))
+    (when (contains? non-payout-rails (:instruction/rail i))
+      [{:rail.error/code :not-a-payout-rail
+        :rail.error/detail (str (pr-str (:instruction/rail i))
+                                " is an acceptance rail; the seller's share leaves the"
+                                " merchant bank account as "
+                                (pr-str (accept/payout-leg-rail (:instruction/rail i))))}])
+    (when-not (or (contains? settle/payout-rails (:instruction/rail i))
+                  (contains? non-payout-rails (:instruction/rail i)))
       [{:rail.error/code :unknown-rail :rail.error/detail (pr-str (:instruction/rail i))}])
-    (when-not (contains? instruction-kinds (:instruction/kind i))
+    ;; Only asked of a rail that is supposed to have a payout shape — an
+    ;; acceptance rail has no kind BECAUSE of the error above, and
+    ;; reporting both would bury the diagnosis under its own consequence.
+    (when-not (or (contains? instruction-kinds (:instruction/kind i))
+                  (contains? non-payout-rails (:instruction/rail i)))
       [{:rail.error/code :unknown-instruction-kind}])
     (when (str/blank? (str (:instruction/to i)))
       [{:rail.error/code :missing-destination}])
