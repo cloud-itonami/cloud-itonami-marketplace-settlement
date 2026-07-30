@@ -1,5 +1,6 @@
 (ns settleops.governor-test
   (:require [clojure.test :refer [deftest is testing]]
+            [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]
             [settleops.advisor :as advisor]
             [settleops.governor :as governor]
@@ -97,8 +98,29 @@
 
 ;; ───────────────────────── escrow release ─────────────────────────
 
-(defn- with-escrow [st basket-id & {:keys [state release-after]
-                                    :or {state :held release-after "2026-06-08T00:00:00Z"}}]
+(defn- capture-value
+  "A PSP-attested コード決済 capture for `basket`, as `:record-payment-capture`
+  carries it."
+  [st basket & {:keys [amount source] :or {source :webhook}}]
+  (let [expected (or amount (:plan/buyer-charge-minor (store/plan-for st basket)))]
+    {:order basket
+     :request (accept/payment-request
+               {:order basket :rail :code-payment :mode :mpm-dynamic :psp "psp.test"
+                :expected-minor expected :currency "JPY"
+                :expires-at "2026-06-02T00:10:00Z" :reference "psp-ref-1"})
+     :attestation (accept/psp-attestation
+                   {:psp "psp.test" :transaction-id "psp-tx-1" :amount-minor expected
+                    :currency "JPY" :attested-at "2026-06-02T00:05:00Z" :source source})}))
+
+(defn- with-capture [st basket & opts]
+  (store/commit-record! st {:op :record-payment-capture
+                            :value (apply capture-value st basket opts)})
+  st)
+
+(defn- with-escrow [st basket-id & {:keys [state release-after paid?]
+                                    :or {state :held release-after "2026-06-08T00:00:00Z"
+                                         paid? true}}]
+  (when paid? (with-capture st basket-id))
   (let [e (-> (settle/escrow {:id "esc-1" :plan (store/plan-for st basket-id)
                               :basket basket-id :opened-at "2026-06-01T00:00:00Z"
                               :release-after release-after})
@@ -211,3 +233,121 @@
   (let [p (store/plan-for (db) "basket-1")]
     (is (false? (:plan/custodial? p)))
     (is (true? (:plan/non-adjudicating p)))))
+
+;; ───────────────────────── the funds gate (HARD 7) ─────────────────────────
+
+(defn- rules [v] (set (mapv :rule (:violations v))))
+
+(deftest custodial-is-decided-by-the-payout-rails-not-by-a-flag
+  (let [st (db)]
+    (testing "basket-1 pays merchant.beta by stripe -- the money passed
+              through the operator, so its arrival is checkable"
+      (is (true? (governor/custodial-plan? st (store/plan-for st "basket-1")))))
+    (testing "basket-3 is merchant.alpha on x402 only -- the buyer paid the
+              seller's treasury directly and there is no operator receipt"
+      (is (false? (governor/custodial-plan? st (store/plan-for st "basket-3")))))))
+
+(deftest an-unrecorded-payment-refuses-and-says-so
+  (let [st (with-escrow (db) "basket-1" :paid? false)
+        v (check st :propose-release {:basket-id "basket-1" :patch {:escrow-id "esc-1"}})]
+    (is (true? (:hard? v)))
+    (is (contains? (rules v) :payment-not-recorded))
+    (testing "unknown is refused rather than assumed fine -- the whole point"
+      (is (nil? (store/acceptance st "basket-1"))))))
+
+(deftest an-x402-only-release-does-not-need-an-acceptance-record
+  (let [st (store/with-delivery (db) "basket-3" true)]
+    (with-escrow st "basket-3" :paid? false)
+    (let [v (check st :propose-release {:basket-id "basket-3" :patch {:escrow-id "esc-1"}})]
+      (is (false? (:hard? v)) (pr-str (:violations v)))
+      (is (true? (:high-stakes? v)) "still a human's call, just not a funds refusal"))))
+
+(deftest a-short-or-over-payment-is-refused-in-its-own-words
+  (testing "short: paying sellers in full would use the operator's money"
+    (let [st (db)]
+      (with-capture st "basket-1" :amount 1000)
+      (with-escrow st "basket-1" :paid? false)
+      (let [v (check st :propose-release {:basket-id "basket-1" :patch {:escrow-id "esc-1"}})]
+        (is (true? (:hard? v)))
+        (is (some #{:payment-short :payment-does-not-cover-plan} (rules v))
+            (pr-str (rules v))))))
+  (testing "over: the buyer is owed a refund before anyone is paid"
+    (let [st (db)]
+      (with-capture st "basket-1" :amount 999999)
+      (with-escrow st "basket-1" :paid? false)
+      (let [v (check st :propose-release {:basket-id "basket-1" :patch {:escrow-id "esc-1"}})]
+        (is (true? (:hard? v)))
+        (is (some #{:payment-over :payment-does-not-cover-plan} (rules v))
+            (pr-str (rules v)))))))
+
+(deftest a-proposal-cannot-buy-itself-a-funds-clearance
+  (testing "the gate reads the STORE; a proposal asserting it was paid is
+            worth exactly what a proposal asserting :payout/verified? is"
+    (let [st (with-escrow (db) "basket-1" :paid? false)
+          proposal (assoc (advise st :propose-release
+                                  {:basket-id "basket-1" :patch {:escrow-id "esc-1"}})
+                          :paid? true
+                          :acceptance {:accept/state :captured :accept/captured-minor 4550})
+          v (governor/check {:op :propose-release :basket-id "basket-1"} ctx proposal st)]
+      (is (true? (:hard? v)))
+      (is (contains? (rules v) :payment-not-recorded)))))
+
+(deftest opening-an-escrow-is-gated-on-payment-too
+  (let [st (db)
+        v (check st :open-escrow {:basket-id "basket-1" :patch {:opened-at now}})]
+    (is (true? (:hard? v)))
+    (is (contains? (rules v) :payment-not-recorded))))
+
+;; ───────────────────── recording a capture (HARD 8) ─────────────────────
+
+(defn- check-capture [st value & [conf]]
+  (governor/check {:op :record-payment-capture :basket-id (:order value)} ctx
+                  {:op :record-payment-capture :effect :propose
+                   :confidence (or conf 0.85) :value value
+                   :summary "入金記録" :rationale "PSP が attest した入金事実の記録のみ。"}
+                  st))
+
+(deftest a-well-formed-capture-passes-but-still-escalates
+  (let [st (db)
+        v (check-capture st (capture-value st "basket-1"))]
+    (is (false? (:hard? v)) (pr-str (:violations v)))
+    (is (true? (:high-stakes? v)))
+    (is (false? (:ok? v))
+        "it writes the evidence the funds gate reads, so it is never automatic")))
+
+(deftest a-buyer-presented-capture-is-a-hard-block
+  (let [st (db)]
+    (doseq [src [:buyer-screen :buyer-screenshot :buyer-claim]]
+      (let [v (check-capture st (capture-value st "basket-1" :source src))]
+        (is (true? (:hard? v)) (str src))
+        (is (contains? (rules v) :buyer-presented-evidence) (str src))))))
+
+(deftest a-capture-recorded-against-the-wrong-order-is-refused
+  (let [st (db)
+        v (check-capture st (assoc (capture-value st "basket-1") :order "basket-3"))]
+    (is (true? (:hard? v)))
+    (is (contains? (rules v) :capture-order-mismatch))))
+
+(deftest a-capture-that-does-not-match-a-committed-plan-is-refused
+  (let [st (db)]
+    (store/commit-record! st {:op :plan-settlement
+                              :value {:basket-id "basket-1"
+                                      :plan (store/plan-for st "basket-1")}})
+    (let [v (check-capture st (capture-value st "basket-1" :amount 1))]
+      (is (true? (:hard? v)))
+      (is (contains? (rules v) :payment-does-not-cover-plan)))))
+
+(deftest a-capture-with-no-payload-is-refused-not-silently-dropped
+  (let [st (db)]
+    (is (contains? (rules (check-capture st {:order "basket-1"}))
+                   :capture-payload-missing))))
+
+(deftest the-mock-advisors-capture-proposal-passes-its-own-governor
+  (testing "the happy path must not self-block, the same property
+            default-mock-advisor-proposals-never-self-trip-scope-exclusion
+            pins for the other five ops"
+    (let [st (db)
+          patch (select-keys (capture-value st "basket-1") [:request :attestation])
+          v (check st :record-payment-capture {:basket-id "basket-1" :patch patch})]
+      (is (false? (:hard? v)) (pr-str (:violations v)))
+      (is (true? (:high-stakes? v))))))

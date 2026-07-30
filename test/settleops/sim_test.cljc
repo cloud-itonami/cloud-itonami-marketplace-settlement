@@ -14,11 +14,21 @@
 
 (deftest the-offline-demo-runs-and-tells-the-truth
   (let [out (with-out-str (sim/-main))]
-    (testing "all four scenarios ran"
+    (testing "every scenario ran"
       (is (str/includes? out "1. 複数出品者バスケットの精算計算"))
       (is (str/includes? out "2. 未検証の支払先を含むバスケット"))
-      (is (str/includes? out "3. エスクロー解放は必ず人間の承認を通る"))
+      (is (str/includes? out "3. 入金の記録が無い解放は人間にすら聞かずに拒否"))
+      (is (str/includes? out "3b. PSP が attest した入金を記録"))
+      (is (str/includes? out "3c. 入金が記録されたので解放が人間の承認を通る"))
       (is (str/includes? out "4. 未配達の注文は人間にすら聞かずに拒否")))
+    (testing "the funds gate fired before any human was asked"
+      (is (str/includes? out "violations : [:payment-not-recorded]"))
+      (is (str/includes? out "入金記録    : nil")))
+    (testing "recording the capture was itself not automatic, and the
+              evidence came from the PSP"
+      (is (str/includes? out "（自動コミットされない）"))
+      (is (str/includes? out "→ :settled"))
+      (is (str/includes? out "出典        : :webhook")))
     (testing "conservation held and nothing was custodial"
       (is (str/includes? out "保存則      : true"))
       (is (str/includes? out "預託しない: true")))

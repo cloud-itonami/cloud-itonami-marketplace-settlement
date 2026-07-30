@@ -20,7 +20,7 @@
   for on-chain USDC, Stripe for cards) performs the actual transfer
   outside this actor.
 
-  Six HARD checks, ALL permanent, un-overridable by any human approval:
+  Eight HARD checks, ALL permanent, un-overridable by any human approval:
 
     1. Plan not conserved       -- seller payouts + commission must equal
                                    gross exactly. Money that does not add
@@ -53,18 +53,37 @@
                                    actuate outside governance.
     6. Scope exclusion          -- any claim to have moved funds, plus any
                                    op outside the closed allowlist.
+    7. Funds not arrived        -- on a CUSTODIAL flow, an escrow may not
+                                   open and a release may not be authorised
+                                   unless the store holds a PSP-attested
+                                   capture that settles the plan exactly.
+                                   See `payment-violations`; this is the
+                                   check whose absence meant an unpaid
+                                   order could be released in full.
+    8. Capture not derivable    -- a `:record-payment-capture` proposal
+                                   must survive `marketplace.acceptance`'s
+                                   own `capture-errors`, so a buyer's
+                                   screenshot, an expired code or a
+                                   bound-amount mismatch is refused before
+                                   a human is asked to approve it.
 
   Two ESCALATE (SOFT) gates:
     - LLM confidence below the floor.
-    - `:bind-payout-destination`, `:propose-release` and
-      `:flag-settlement-concern` ALWAYS escalate. Binding where a
-      seller's money goes is the money-equivalent of issuing an
-      identity, and authorising a release is the moment money actually
-      leaves. Neither may EVER become auto-commit-eligible;
-      `settleops.phase` keeps all three out of every phase's `:auto`
+    - `:bind-payout-destination`, `:propose-release`,
+      `:flag-settlement-concern` and `:record-payment-capture` ALWAYS
+      escalate. Binding where a seller's money goes is the money-equivalent
+      of issuing an identity, and authorising a release is the moment money
+      actually leaves. `:record-payment-capture` is here for a different
+      reason worth stating plainly: it writes THE EVIDENCE THE FUNDS GATE
+      STANDS ON. An actor that could auto-commit its own payment evidence
+      would be an actor that can unlock check 7 by itself, which is not a
+      gate. None of the four may EVER become auto-commit-eligible;
+      `settleops.phase` keeps all four out of every phase's `:auto`
       set independently -- two layers, not one."
   (:require [clojure.string :as str]
+            [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]
+            [settleops.rail :as rail]
             [settleops.store :as store]))
 
 (def confidence-floor 0.6)
@@ -75,10 +94,11 @@
   scope violation, not merely un-implemented. `:propose-release`
   AUTHORISES a transfer for a rail to perform; it does not perform one."
   #{:plan-settlement :bind-payout-destination :open-escrow
-    :propose-release :flag-settlement-concern})
+    :propose-release :flag-settlement-concern :record-payment-capture})
 
 (def always-escalate-ops
-  #{:bind-payout-destination :propose-release :flag-settlement-concern})
+  #{:bind-payout-destination :propose-release :flag-settlement-concern
+    :record-payment-capture})
 
 (def scope-excluded-terms
   "Case-insensitive substrings marking a proposal as claiming to have
@@ -159,6 +179,128 @@
                        (store/delivered? st (:escrow/basket e))
                        " / release-after " (:escrow/release-after e))}]))))
 
+;; ----------------------------- the funds gate -----------------------------
+
+(defn custodial-plan?
+  "Does the buyer's money for this plan pass through the OPERATOR?
+
+  Read from the store's payout destinations, per seller, via
+  `settleops.rail/instruction-kind`:
+
+    :direct-split (x402)  the buyer paid each seller's own treasury
+                          directly at pay time. There is no operator-side
+                          receipt to require, and demanding one would
+                          block the rail this actor already runs in
+                          production. Evidence there is `rail/reconcile`.
+    :transfer     (stripe / bank-transfer / a コード決済 PSP settling to
+                          the merchant bank account) funds passed through
+                          the platform, so the buyer's payment IS a fact
+                          this actor can and must check.
+
+  Mixed baskets count as custodial: if even one seller is paid out of
+  money the operator received, that money had to arrive."
+  [st plan]
+  (boolean
+   (some (fn [alloc]
+           (let [d (store/payout-destination st (:alloc/seller alloc))]
+             (= :transfer (rail/instruction-kind (:payout/rail d)))))
+         (:plan/allocations plan))))
+
+(defn- payment-violations
+  "HARD check 7. On a custodial flow, refuse to open an escrow or
+  authorise a release until the store holds a PSP-attested capture that
+  settles this plan exactly.
+
+  Read from the STORE, never from the proposal -- a proposal asserting
+  `{:paid? true}` is worth exactly as much as one asserting
+  `:payout/verified?`, which is to say nothing.
+
+  A MISSING acceptance is refused, not treated as 'probably fine'. That
+  asymmetry is the whole point: the failure this closes is an unpaid order
+  being released in full, and the only reason it was possible is that
+  nobody asked."
+  [proposal st]
+  (when (contains? #{:open-escrow :propose-release} (:op proposal))
+    (let [[order plan]
+          (if (= :open-escrow (:op proposal))
+            [(get-in proposal [:value :basket-id]) (plan-of proposal st)]
+            (let [e (some->> (get-in proposal [:value :escrow-id]) (store/escrow st))]
+              [(:escrow/basket e) (:escrow/plan e)]))]
+      ;; A missing plan/escrow is already reported by checks 1 and 3; do not
+      ;; pile a second diagnosis onto the same cause.
+      (when (and order plan (custodial-plan? st plan))
+        (let [a (store/acceptance st order)
+              {:keys [status expected captured]} (when a (accept/settlement-status a))]
+          (cond
+            (nil? a)
+            [{:rule :payment-not-recorded
+              :detail (str order " について PSP が attest した入金の記録がない"
+                           " -- 未記録は「未入金」として扱う（不明を良しとしない）")}]
+
+            (not= :captured (:accept/state a))
+            [{:rule :payment-not-captured
+              :detail (str "入金の状態は " (pr-str (:accept/state a))
+                           " であって :captured ではない")}]
+
+            (not= :settled status)
+            [{:rule (case status :short :payment-short :over :payment-over :payment-not-settled)
+              :detail (str "請求 " expected " に対して着金 " (pr-str captured)
+                           " -- 不足なら運営の自腹、超過なら買い手への返金義務が先")}]
+
+            (not (accept/covers-plan? a plan))
+            [{:rule :payment-does-not-cover-plan
+              :detail (str "着金額が精算計画の買い手請求額 "
+                           (:plan/buyer-charge-minor plan) " "
+                           (:plan/currency plan) " と一致しない")}]))))))
+
+(defn- capture-violations
+  "HARD check 8. A `:record-payment-capture` proposal must be one
+  `marketplace.acceptance` would actually produce.
+
+  The library owns what counts as evidence -- only the PSP speaking
+  (`attestation-sources`), never a buyer-presented completion screen, and
+  never a capture after the code expired. Re-deriving it here means the
+  refusal happens BEFORE a human is asked to approve, rather than the
+  store silently writing nothing and everyone assuming it worked."
+  [proposal st]
+  (when (= :record-payment-capture (:op proposal))
+    (let [{:keys [request attestation]} (:value proposal)
+          order (:accept/order request)]
+      (cond
+        (not (and (map? request) (map? attestation)))
+        [{:rule :capture-payload-missing
+          :detail "入金記録には payment request と PSP attestation の両方が必要"}]
+
+        (seq (accept/payment-request-errors request))
+        (mapv (fn [e] {:rule (:accept.error/code e)
+                       :detail (or (:accept.error/detail e)
+                                   (name (:accept.error/code e)))})
+              (accept/payment-request-errors request))
+
+        (seq (accept/capture-errors request attestation))
+        (mapv (fn [e] {:rule (:accept.error/code e)
+                       :detail (or (:accept.error/detail e)
+                                   (name (:accept.error/code e)))})
+              (accept/capture-errors request attestation))
+
+        ;; The order must be the one being claimed. Recording merchant A's
+        ;; capture against merchant B's order would satisfy every other
+        ;; check and unlock the wrong release.
+        (not= (str order) (str (get-in proposal [:value :order])))
+        [{:rule :capture-order-mismatch
+          :detail (str "request の order " (pr-str order) " と提案の order "
+                       (pr-str (get-in proposal [:value :order])) " が一致しない")}]
+
+        ;; If a plan is already committed for this order, the amount being
+        ;; captured must be the amount that plan says the buyer owes.
+        :else
+        (when-let [p (store/plan st order)]
+          (when-not (accept/covers-plan? request p)
+            [{:rule :payment-does-not-cover-plan
+              :detail (str "請求額 " (:accept/expected-minor request)
+                           " が計画の買い手請求額 " (:plan/buyer-charge-minor p)
+                           " と一致しない")}]))))))
+
 (defn- destination-violations
   "For `:bind-payout-destination`: the drafted destination must itself be
   structurally sound. Note this check does NOT accept the proposal's own
@@ -209,6 +351,8 @@
         hard (into []
                    (concat (plan-violations proposal store)
                            (release-violations proposal store now)
+                           (payment-violations proposal store)
+                           (capture-violations proposal store)
                            (destination-violations proposal)
                            (effect-not-propose-violations proposal)
                            (scope-exclusion-violations proposal)))
