@@ -4,6 +4,7 @@
   approver from `:value` would silently record every release as
   unattributed, which is exactly what the audit ledger exists to prevent."
   (:require [clojure.test :refer [deftest is testing]]
+            [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]
             [settleops.store :as store]))
 
@@ -138,3 +139,83 @@
     (is (= [] (store/ledger st)))
     (is (= 1000 (:fee/commission-bps (store/fee-schedule st))))
     (is (some? (store/operator st)))))
+
+;; ───────────────────────── refunds ─────────────────────────
+
+(defn- capture! [st basket]
+  (let [expected (:plan/buyer-charge-minor (store/plan-for st basket))]
+    (store/commit-record!
+     st {:op :record-payment-capture
+         :value {:order basket
+                 :request (accept/payment-request
+                           {:order basket :rail :code-payment :mode :mpm-dynamic
+                            :psp "psp.test" :expected-minor expected :currency "JPY"
+                            :expires-at "2026-06-02T00:10:00Z"})
+                 :attestation (accept/psp-attestation
+                               {:psp "psp.test" :transaction-id "psp-tx-1"
+                                :amount-minor expected :currency "JPY"
+                                :attested-at "2026-06-02T00:05:00Z" :source :webhook})}})
+    st))
+
+(defn- refund! [st basket amount & {:keys [by] :or {by "treasury-01"}}]
+  (store/commit-record! st {:op :propose-refund
+                            :value {:order basket :amount-minor amount
+                                    :reason "未着" :requested-at "2026-08-01T00:00:00Z"}
+                            :payload (when by {:approved-by by})})
+  st)
+
+(deftest a-refund-is-derived-from-the-stored-capture-and-booked-against-it
+  (let [st (capture! (store/seed-db) "basket-1")]
+    (refund! st "basket-1" 550)
+    (let [a (store/acceptance st "basket-1")
+          [r] (store/refunds st "basket-1")]
+      (testing "the instruction is derived here, not carried by the proposal"
+        (is (= :code-payment (:refund/rail r)))
+        (is (= "psp-tx-1" (:refund/original-transaction r)))
+        (is (= :psp-original-transaction (:refund/via r)))
+        (is (= 550 (:refund/amount-minor r)))
+        (is (true? (:refund/partial? r))))
+      (testing "the approver's name comes from :payload, like a release"
+        (is (= "treasury-01" (:refund/requested-by r))))
+      (testing "and it is booked so the funds gate can see it"
+        (is (= 550 (accept/refunded-minor a)))
+        (is (= 4000 (accept/net-captured-minor a)))
+        (is (= :captured (:accept/state a)))
+        (is (false? (accept/releasable-to-settlement? a)))))))
+
+(deftest a-full-refund-takes-the-acceptance-out-of-captured
+  (let [st (capture! (store/seed-db) "basket-1")]
+    (refund! st "basket-1" 4550)
+    (let [a (store/acceptance st "basket-1")]
+      (is (= :refunded (:accept/state a)))
+      (is (= 0 (accept/net-captured-minor a)))
+      (is (= :missing (:status (accept/settlement-status a)))))))
+
+(deftest an-unattributed-refund-is-not-booked-at-all
+  (testing "no approver means no instruction — money must not go back on
+            nobody's authority"
+    (let [st (capture! (store/seed-db) "basket-1")]
+      (refund! st "basket-1" 550 :by nil)
+      (is (empty? (store/refunds st "basket-1")))
+      (is (= 0 (accept/refunded-minor (store/acceptance st "basket-1"))))
+      (testing "and the record is still in the log, so the attempt is visible"
+        (is (= 2 (count (store/settlement-log st))))))))
+
+(deftest a-refund-beyond-what-is-held-books-nothing
+  (let [st (capture! (store/seed-db) "basket-1")]
+    (refund! st "basket-1" 4551)
+    (is (empty? (store/refunds st "basket-1")))
+    (is (= 4550 (accept/net-captured-minor (store/acceptance st "basket-1"))))
+    (testing "and two half refunds are fine, a third is not"
+      (refund! st "basket-1" 2275)
+      (refund! st "basket-1" 2275)
+      (is (= 2 (count (store/refunds st "basket-1"))))
+      (refund! st "basket-1" 1)
+      (is (= 2 (count (store/refunds st "basket-1")))))))
+
+(deftest a-refund-for-an-order-with-no-capture-books-nothing
+  (let [st (store/seed-db)]
+    (refund! st "basket-1" 100)
+    (is (empty? (store/refunds st "basket-1")))
+    (is (nil? (store/acceptance st "basket-1")))
+    (is (= [] (store/all-refunds st)))))

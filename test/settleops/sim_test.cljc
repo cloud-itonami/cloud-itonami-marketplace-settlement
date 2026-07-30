@@ -40,3 +40,10 @@
       (is (str/includes? out "=== 監査台帳 ===")))
     (testing "and no transfer was ever executed from this repository"
       (is (not (re-find #"(?i)executed\?\s*:?\s*true" out))))))
+
+(deftest the-demo-shows-a-refund-refused-after-a-release
+  (let [out (with-out-str (sim/-main))]
+    (is (str/includes? out "5. 解放済みの注文への返金は拒否"))
+    (is (str/includes? out "violations : [:refund-after-release]"))
+    (is (str/includes? out "返金記録    : []")
+        "nothing was booked — the buyer would have been paid the sellers' money")))

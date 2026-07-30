@@ -292,3 +292,53 @@
                        (assoc op-context :phase 0))]
       (is (= :hold (:disposition (:state result))))
       (is (empty? (store/settlement-log st))))))
+
+;; ───────────────────────── refunds ─────────────────────────
+
+(deftest a-refund-needs-a-human-and-is-booked-against-the-capture
+  (let [st (with-capture (store/seed-db) "basket-1")
+        actor (operation/build st)
+        held (exec actor "t-refund" {:op :propose-refund :basket-id "basket-1"
+                                     :patch {:amount-minor 550 :reason "一部返品"}})]
+    (is (= :interrupted (:status held)) "money going back is never automatic")
+    (is (empty? (store/refunds st "basket-1")))
+    (let [approved (g/run* actor {:approval {:status :approved :by "treasury-01"}}
+                           {:thread-id "t-refund" :resume? true})
+          a (store/acceptance st "basket-1")
+          [r] (store/refunds st "basket-1")]
+      (is (= :done (:status approved)))
+      (is (= "treasury-01" (:refund/requested-by r)) "attributed to the approver")
+      (is (= 550 (accept/refunded-minor a)))
+      (is (= 4000 (accept/net-captured-minor a)))
+      (testing "and the release it would have funded is now short"
+        (is (false? (accept/releasable-to-settlement? a)))))))
+
+(deftest a-rejected-refund-books-nothing
+  (let [st (with-capture (store/seed-db) "basket-1")
+        actor (operation/build st)
+        _ (exec actor "t-refund-rej" {:op :propose-refund :basket-id "basket-1"
+                                      :patch {:amount-minor 550}})
+        rejected (g/run* actor {:approval {:status :rejected :by "treasury-01"}}
+                         {:thread-id "t-refund-rej" :resume? true})]
+    (is (= :hold (:disposition (:state rejected))))
+    (is (empty? (store/refunds st "basket-1")))
+    (is (= 4550 (accept/net-captured-minor (store/acceptance st "basket-1"))))))
+
+(deftest a-refund-after-a-release-never-reaches-a-human
+  (testing "that money went to sellers; paying the buyer too is paying twice"
+    (let [st (with-escrow (store/seed-db) "basket-1")
+          actor (operation/build st)
+          _ (exec actor "t-rel" {:op :propose-release :basket-id "basket-1"
+                                 :patch {:escrow-id "esc-1"}})
+          _ (g/run* actor {:approval {:status :approved :by "treasury-01"}}
+                    {:thread-id "t-rel" :resume? true})
+          result (exec actor "t-refund-after" {:op :propose-refund :basket-id "basket-1"
+                                               :patch {:amount-minor 100}})]
+      (is (= :released (:escrow/state (store/escrow st "esc-1"))))
+      (is (= :done (:status result)) "not :interrupted")
+      (is (= :hold (:disposition (:state result))))
+      ;; The release committed first, so the hold is not the ledger's head.
+      (is (some #{:refund-after-release}
+                (mapcat #(map :rule (:violations %))
+                        (filter #(= :governor-hold (:t %)) (store/ledger st)))))
+      (is (empty? (store/refunds st "basket-1"))))))

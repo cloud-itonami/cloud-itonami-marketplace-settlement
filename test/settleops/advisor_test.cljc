@@ -25,6 +25,8 @@
                           {:psp "psp.test" :transaction-id "psp-tx-1"
                            :amount-minor 4550 :currency "JPY"
                            :attested-at "2026-06-02T00:05:00Z" :source :webhook})}}
+   {:op :propose-refund          :basket-id "basket-1"
+    :patch {:amount-minor 4550 :reason "未着" :requested-at "2026-08-01T00:00:00Z"}}
    {:op :flag-settlement-concern :basket-id "basket-1" :patch {:concern :short-payment}}])
 
 (deftest every-proposal-is-propose-only
@@ -40,7 +42,7 @@
   (testing "an op the advisor does not know produces nothing, not a guess"
     (is (= {} (advisor/infer (store/seed-db) {:op :transfer-funds})))
     (is (= {} (advisor/infer (store/seed-db) {:op nil}))))
-  (testing "and the six it does know are exactly the governor's allowlist"
+  (testing "and the seven it does know are exactly the governor's allowlist"
     (is (= governor/allowed-ops (set (map :op ops))))))
 
 (deftest a-capture-proposal-relays-the-psp-and-invents-nothing
@@ -86,6 +88,20 @@
     (is (= ["merchant.delta"] (:cites p)))
     (testing "the advisor may echo :verified?, and the governor reads the STORE instead"
       (is (nil? (store/payout-destination (store/seed-db) "merchant.delta"))))))
+
+(deftest a-refund-proposal-carries-the-ask-and-not-the-instruction
+  (let [p (advisor/infer (store/seed-db) (nth ops 5))]
+    (is (= :propose-refund (:op p)))
+    (is (= {:order "basket-1" :amount-minor 4550 :reason "未着"
+            :requested-at "2026-08-01T00:00:00Z"}
+           (:value p)))
+    (testing "the instruction is NOT built here -- the store derives it from
+              the stored capture and the approver's name"
+      (is (not (contains? (:value p) :refund/rail)))
+      (is (nil? (get-in p [:value :requested-by]))))
+    (testing "and the rationale describes the authorisation, not a done refund"
+      (is (= :propose (:effect p)))
+      (is (not (re-find #"送金|返金した|完了した" (:rationale p)))))))
 
 (deftest confidence-comes-from-the-patch-when-given
   (is (= 0.42 (:confidence (advisor/infer (store/seed-db)

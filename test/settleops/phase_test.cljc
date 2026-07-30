@@ -67,3 +67,14 @@
             (str op " at phase 3"))))
     (testing "the ops that MAY auto-commit are exactly the two that move nothing"
       (is (= #{:plan-settlement :open-escrow} (:auto (get phase/phases 3)))))))
+
+(deftest a-refund-is-writable-only-where-a-release-is
+  (testing "both are irreversible outward movements; a phase that could
+            refund but not release would be a strange half-state"
+    (is (= {:disposition :hold :reason :phase-disabled} (gate 1 :propose-refund :commit)))
+    (is (= {:disposition :hold :reason :phase-disabled} (gate 2 :propose-refund :commit)))
+    (is (= {:disposition :escalate :reason :phase-approval}
+           (gate 3 :propose-refund :commit))))
+  (testing "and it is in no phase's :auto set"
+    (doseq [[ph {:keys [auto]}] phase/phases]
+      (is (not (contains? auto :propose-refund)) (str "phase " ph)))))

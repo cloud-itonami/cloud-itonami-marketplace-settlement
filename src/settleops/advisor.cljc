@@ -2,10 +2,11 @@
   "SettlementAdvisor -- the *contained intelligence node* for the
   marketplace settlement actor.
 
-  It drafts exactly six kinds of proposal from a closed allowlist:
+  It drafts exactly seven kinds of proposal from a closed allowlist:
   computing a settlement plan for a basket, binding a seller's payout
   destination, opening an escrow, authorising a release, recording a
-  PSP-attested payment capture, and flagging a settlement concern.
+  PSP-attested payment capture, authorising a refund to the buyer, and
+  flagging a settlement concern.
 
   CRITICAL: it is a smart-but-untrusted advisor, and this is the actor
   where that matters most, because the subject is money. Every
@@ -115,6 +116,30 @@
      :value     {:order order :request request :attestation attestation}
      :confidence (or (:confidence patch) 0.85)}))
 
+(defn- propose-refund
+  "Authorise giving money back to the BUYER. ALWAYS escalates -- this is
+  the moment money leaves toward the buyer, the mirror of
+  `propose-release`.
+
+  Carries only the order, the amount and a reason. The INSTRUCTION is not
+  built here: `settleops.store` derives it from the stored capture and the
+  approver's name, so the amount is checked against what is still held and
+  the refund is attributable. The rationale describes the AUTHORISATION,
+  never a completed refund."
+  [_st {:keys [basket-id patch]}]
+  (let [order (or (:order patch) basket-id)]
+    {:op        :propose-refund
+     :basket-id order
+     :summary   (str order " の返金 " (pr-str (:amount-minor patch)) " の承認を提案")
+     :rationale "買い手への返金の承認依頼のみ。返金そのものは承認後に PSP が元取引に対して行い、このアクターは実行しない。"
+     :cites     (vec (keep identity [order (:reason patch)]))
+     :effect    :propose
+     :value     {:order order
+                 :amount-minor (:amount-minor patch)
+                 :reason (:reason patch)
+                 :requested-at (:requested-at patch)}
+     :confidence (or (:confidence patch) 0.86)}))
+
 (defn- propose-settlement-concern
   [_st {:keys [basket-id patch]}]
   {:op        :flag-settlement-concern
@@ -134,6 +159,7 @@
                    :open-escrow             (propose-escrow st request)
                    :propose-release         (propose-release st request)
                    :record-payment-capture  (propose-payment-capture st request)
+                   :propose-refund          (propose-refund st request)
                    :flag-settlement-concern (propose-settlement-concern st request)
                    {})]
     ;; Test hook: inject scope-excluded content to exercise the

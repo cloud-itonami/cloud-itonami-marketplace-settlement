@@ -13,7 +13,7 @@
         ;; it does not reimplement it.
         io.github.kotoba-lang/marketplace
         {:git/url "https://github.com/kotoba-lang/marketplace.git"
-         :git/sha "ea26053e6f545b81d4dfd7188ce9b28f89f642e0"}
+         :git/sha "57fc7b3aedcc7d0c6ffb48ac9d4fff1bdf4c6e78"}
         ;; HOST half only (`settleops.edge.worker`): q / pull / datoms / transact
         ;; against kotobase.net with a per-request CACAO. The actor core
         ;; stays portable .cljc with no network I/O.
@@ -32,6 +32,13 @@
          :exec-fn cognitect.test-runner.api/test}
   :cljs {:extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}
                       thheller/shadow-cljs {:mvn/version "2.28.20"}}}
+  ;; What `shadow-cljs.edn` resolves: the :cljs deps plus the test path, so
+  ;; the same portable suite runs under a ClojureScript host. Kept separate
+  ;; from :test because shadow-cljs passes the alias to `clojure -A`, where
+  ;; that alias's :main-opts reach the wrong main and the build dies.
+  :cljs-test {:extra-paths ["test"]
+              :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}
+                           thheller/shadow-cljs {:mvn/version "2.28.20"}}}
   :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts    ["-m" "clj-kondo.main"
                         "--lint" "src" "test"
