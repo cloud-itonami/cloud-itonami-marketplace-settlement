@@ -113,6 +113,17 @@ different shapes:
 |---|---|---|---|
 | x402 | `:direct-split` | no | the buyer already paid each seller's treasury directly; the job is **reconciliation** |
 | Stripe | `:transfer` | yes | funds passed through the platform; the job is a **Connect transfer** |
+| コード決済 | — | yes | **not a payout rail at all** — see below |
+
+**コード決済 (QR / barcode code payment) is refused here by name.** It is
+the buyer → platform direction, modelled in `marketplace.acceptance`, and
+a code-payment PSP settles to ONE merchant's bank account — so it can
+never be a per-seller payout destination. An instruction on that rail
+fails with `:not-a-payout-rail` rather than `:unknown-rail`, because the
+next person to see `:unknown-rail` for `:code-payment` would reasonably
+"fix" it by adding an entry to the kind table, which is the exact mistake
+the refusal exists to stop. The seller's share leaves the merchant bank
+account as a `:bank-transfer` (`acceptance/payout-leg-rail`).
 
 `execute-transfer!` refuses an x402 instruction outright, because there
 is nothing to execute. Inventing an x402 `POST /transfer` would have

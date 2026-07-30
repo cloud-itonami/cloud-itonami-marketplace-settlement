@@ -2,6 +2,7 @@
   "The rail adapter. Every HTTP call in these tests goes to a recording
   stub — nothing here has ever reached a real rail."
   (:require [clojure.test :refer [deftest is testing]]
+            [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]
             [settleops.rail :as rail]
             [settleops.rail.client :as client]
@@ -70,6 +71,32 @@
     (is (seq (rail/instruction-errors (assoc i :instruction/to ""))))
     (is (seq (rail/instruction-errors (assoc i :instruction/rail :carrier-pigeon))))
     (is (seq (rail/instruction-errors (assoc i :instruction/amount-minor -1))))))
+
+(deftest a-code-payment-is-refused-by-name-not-as-an-unknown-rail
+  (let [i (assoc (first (rail/instructions-for (released-escrow) (dests)))
+                 :instruction/rail :code-payment
+                 :instruction/kind (rail/instruction-kind :code-payment))
+        codes (set (map :rail.error/code (rail/instruction-errors i)))]
+    (testing "the refusal names the mistake, so nobody 'fixes' it by adding
+              :code-payment to the payout kind table"
+      (is (contains? codes :not-a-payout-rail))
+      (is (not (contains? codes :unknown-rail))))
+    (testing "and does not also report the missing kind, which is its own consequence"
+      (is (not (contains? codes :unknown-instruction-kind)))
+      (is (nil? (rail/instruction-kind :code-payment))))
+    (testing "the detail says where the seller's share actually travels"
+      (is (= :bank-transfer (accept/payout-leg-rail :code-payment)))
+      (is (contains? (set (map :rail.error/code
+                               (rail/instruction-errors
+                                (assoc i :instruction/rail :carrier-pigeon))))
+                     :unknown-rail)
+          "a genuinely unknown rail is still :unknown-rail"))))
+
+(deftest acceptance-and-payout-remain-different-sets
+  (testing "code payment arrives on the buyer side; it is never a payout destination"
+    (is (contains? accept/acceptance-rails :code-payment))
+    (is (not (contains? settle/payout-rails :code-payment)))
+    (is (contains? rail/non-payout-rails :code-payment))))
 
 ;; ───────────────────── reconciliation ─────────────────────
 
