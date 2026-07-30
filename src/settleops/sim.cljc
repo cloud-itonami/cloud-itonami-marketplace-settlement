@@ -1,8 +1,9 @@
 (ns settleops.sim
   "Offline demo: compute a multi-seller settlement, watch an unverified
   payout destination block a basket, watch a release refused because
-  nobody recorded that the buyer paid, then record a PSP-attested capture
-  and watch the release wait for a human. `clojure -M:dev:run`."
+  nobody recorded that the buyer paid, record a PSP-attested capture and
+  watch the release wait for a human, then watch a refund refused because
+  the money already went to the sellers. `clojure -M:dev:run`."
   (:require [langgraph.graph :as g]
             [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]
@@ -103,6 +104,13 @@
                                      :patch {:escrow-id "esc-3"}})]
       (println "  status     :" (:status r))
       (println "  violations :" (mapv :rule (:violations (last (store/ledger s))))))
+
+    (println "\n=== 5. 解放済みの注文への返金は拒否（二重払いになる）===")
+    (let [r (run-req! actor "sim-5" {:op :propose-refund :basket-id "basket-1"
+                                     :patch {:amount-minor 1000 :reason "返品"}})]
+      (println "  status     :" (:status r))
+      (println "  violations :" (mapv :rule (:violations (last (store/ledger s)))))
+      (println "  返金記録    :" (store/refunds s "basket-1")))
 
     (println "\n=== 監査台帳 ===")
     (doseq [f (store/ledger s)]

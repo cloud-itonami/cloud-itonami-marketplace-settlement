@@ -1,8 +1,20 @@
-;; The settlement actor's Worker. :esm, the same shape every
-;; marketplace actor's host build uses.
-{:deps {:aliases [:cljs]}
+;; The settlement actor's Worker (:esm, the same shape every marketplace
+;; actor's host build uses) and the portable test suite under a real
+;; ClojureScript host.
+;;
+;; CLAUDE.md's runtime priority puts ClojureScript above the JVM and every
+;; namespace here except `settleops.edge.worker` is `.cljc` -- but the only
+;; thing that had ever run the suite was `clojure -M:test`, so "portable"
+;; was an assertion nobody checked. `npm run test:cljs` checks it.
+{:deps {:aliases [:cljs-test]}
  :builds
- {:worker
+ {:test
+  {:target    :node-test
+   :output-to "out/node-tests.js"
+   :ns-regexp "-test$"
+   :compiler-options {:output-feature-set :es2020}}
+
+  :worker
   {:target :esm
    :output-dir "dist"
    :modules {:worker {:exports {default settleops.edge.worker/app}}}

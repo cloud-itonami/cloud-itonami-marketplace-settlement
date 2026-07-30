@@ -351,3 +351,84 @@
           v (check st :record-payment-capture {:basket-id "basket-1" :patch patch})]
       (is (false? (:hard? v)) (pr-str (:violations v)))
       (is (true? (:high-stakes? v))))))
+
+;; ───────────────────── refunds (HARD 9) ─────────────────────
+
+(defn- check-refund [st order amount]
+  (check st :propose-refund {:basket-id order :patch {:order order :amount-minor amount}}))
+
+(deftest a-refund-needs-a-capture-to-come-from
+  (let [st (db)]
+    (is (contains? (rules (check-refund st "basket-1" 100)) :refund-without-capture))
+    (testing "and a blank order names that instead"
+      (is (contains? (rules (check-refund st "" 100)) :refund-order-missing)))))
+
+(deftest a-well-formed-refund-passes-and-escalates
+  (let [st (with-capture (db) "basket-1")
+        v (check-refund st "basket-1" 4550)]
+    (is (false? (:hard? v)) (pr-str (:violations v)))
+    (is (true? (:high-stakes? v)))
+    (is (false? (:ok? v)) "money leaving toward the buyer is a human's call too")))
+
+(deftest a-refund-cannot-exceed-what-is-still-held
+  (let [st (with-capture (db) "basket-1")]
+    (is (contains? (rules (check-refund st "basket-1" 4551)) :refund-exceeds-held))
+    (is (contains? (rules (check-refund st "basket-1" 0)) :refund-amount-invalid))
+    (is (contains? (rules (check-refund st "basket-1" -100)) :refund-amount-invalid))
+    (testing "after a partial refund the ceiling is the remainder"
+      (store/commit-record! st {:op :propose-refund
+                                :value {:order "basket-1" :amount-minor 550}
+                                :payload {:approved-by "treasury-01"}})
+      (is (false? (:hard? (check-refund st "basket-1" 4000))))
+      (is (contains? (rules (check-refund st "basket-1" 4001)) :refund-exceeds-held)))))
+
+(deftest money-that-already-went-to-sellers-cannot-also-go-back
+  (let [st (with-escrow (db) "basket-1")]
+    (store/commit-record! st {:op :propose-release
+                              :value {:escrow-id "esc-1"}
+                              :payload {:approved-by "treasury-01"}})
+    (is (= :released (:escrow/state (store/escrow st "esc-1"))))
+    (is (contains? (rules (check-refund st "basket-1" 100)) :refund-after-release)
+        "refunding after a release pays the same money twice")))
+
+(deftest refunding-a-disputed-escrow-would-be-adjudicating
+  (let [st (with-escrow (db) "basket-1" :state :disputed)]
+    (is (contains? (rules (check-refund st "basket-1" 100)) :refund-resolves-dispute)
+        "resolve-dispute is the only door, and it needs a named human")))
+
+(deftest a-fully-refunded-capture-has-nothing-left-to-refund
+  (let [st (with-capture (db) "basket-1")]
+    (store/commit-record! st {:op :propose-refund
+                              :value {:order "basket-1" :amount-minor 4550}
+                              :payload {:approved-by "treasury-01"}})
+    (is (= :refunded (:accept/state (store/acceptance st "basket-1"))))
+    (is (contains? (rules (check-refund st "basket-1" 1)) :refund-without-capture))))
+
+(deftest a-refund-closes-the-funds-gate-behind-it
+  (testing "the release that the capture would have funded is refused again"
+    (let [st (with-escrow (db) "basket-1")]
+      (is (false? (:hard? (check st :propose-release
+                                 {:basket-id "basket-1" :patch {:escrow-id "esc-1"}}))))
+      (store/commit-record! st {:op :propose-refund
+                                :value {:order "basket-1" :amount-minor 4550}
+                                :payload {:approved-by "treasury-01"}})
+      (let [v (check st :propose-release {:basket-id "basket-1" :patch {:escrow-id "esc-1"}})]
+        (is (true? (:hard? v)))
+        (is (some #{:payment-not-captured :payment-not-recorded} (rules v))
+            (pr-str (rules v))))))
+  (testing "and a partial refund leaves it short rather than settled"
+    (let [st (with-escrow (db) "basket-1")]
+      (store/commit-record! st {:op :propose-refund
+                                :value {:order "basket-1" :amount-minor 50}
+                                :payload {:approved-by "treasury-01"}})
+      (let [v (check st :propose-release {:basket-id "basket-1" :patch {:escrow-id "esc-1"}})]
+        (is (true? (:hard? v)))
+        (is (some #{:payment-short :payment-does-not-cover-plan} (rules v))
+            (pr-str (rules v)))))))
+
+(deftest the-mock-advisors-refund-proposal-passes-its-own-governor
+  (let [st (with-capture (db) "basket-1")
+        v (check st :propose-refund {:basket-id "basket-1"
+                                     :patch {:amount-minor 4550 :reason "未着"}})]
+    (is (false? (:hard? v)) (pr-str (:violations v)))
+    (is (true? (:high-stakes? v)))))

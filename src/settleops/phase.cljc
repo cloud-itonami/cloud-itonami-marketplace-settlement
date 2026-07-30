@@ -11,12 +11,12 @@
                                    `:plan-settlement` and `:open-escrow`
                                    may auto-commit.
 
-  `:bind-payout-destination`, `:propose-release`,
+  `:bind-payout-destination`, `:propose-release`, `:propose-refund`,
   `:flag-settlement-concern` and `:record-payment-capture` are
   deliberately ABSENT from every phase's `:auto` set, INCLUDING phase 3 --
   a permanent structural fact, not a rollout milestone still to come.
 
-  The three that matter are the two that decide about money and the one
+  The four that matter are the three that decide about money and the one
   that decides what counts as proof it arrived:
 
     - `:bind-payout-destination` decides WHERE a seller's money goes.
@@ -26,6 +26,10 @@
       the same reason.
     - `:propose-release` decides WHEN money leaves. Computing a plan is
       reversible (recompute it); releasing is not.
+    - `:propose-refund` decides when money leaves toward the BUYER. It is
+      the mirror of `:propose-release` and is writable only where release
+      is (phase 3): both are irreversible outward movements, and a phase
+      that could refund but not release would be a strange half-state.
     - `:record-payment-capture` writes the evidence the governor's funds
       gate reads. It moves nothing, which makes it look auto-committable,
       and that appearance is the trap: an actor that can write its own
@@ -41,7 +45,7 @@
 (def read-ops #{})
 (def write-ops governor/allowed-ops)
 
-;; NOTE the invariant: the four ops above are members of `write-ops`
+;; NOTE the invariant: the five ops above are members of `write-ops`
 ;; (governor-gated like any write) but are NEVER members of any phase's
 ;; `:auto` set below. Do not add them there.
 ;;

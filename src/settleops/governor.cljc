@@ -20,7 +20,7 @@
   for on-chain USDC, Stripe for cards) performs the actual transfer
   outside this actor.
 
-  Eight HARD checks, ALL permanent, un-overridable by any human approval:
+  Nine HARD checks, ALL permanent, un-overridable by any human approval:
 
     1. Plan not conserved       -- seller payouts + commission must equal
                                    gross exactly. Money that does not add
@@ -66,20 +66,29 @@
                                    screenshot, an expired code or a
                                    bound-amount mismatch is refused before
                                    a human is asked to approve it.
+    9. Refund has nothing to    -- a refund needs money STILL HELD. Refused
+       come from                   when there is no capture, when the escrow
+                                   already released (that money went to
+                                   sellers; paying the buyer too is paying
+                                   twice), when the escrow is disputed
+                                   (refunding IS deciding the dispute), or
+                                   when the amount exceeds what remains
+                                   after earlier refunds.
 
   Two ESCALATE (SOFT) gates:
     - LLM confidence below the floor.
-    - `:bind-payout-destination`, `:propose-release`,
+    - `:bind-payout-destination`, `:propose-release`, `:propose-refund`,
       `:flag-settlement-concern` and `:record-payment-capture` ALWAYS
       escalate. Binding where a seller's money goes is the money-equivalent
-      of issuing an identity, and authorising a release is the moment money
-      actually leaves. `:record-payment-capture` is here for a different
-      reason worth stating plainly: it writes THE EVIDENCE THE FUNDS GATE
-      STANDS ON. An actor that could auto-commit its own payment evidence
-      would be an actor that can unlock check 7 by itself, which is not a
-      gate. None of the four may EVER become auto-commit-eligible;
-      `settleops.phase` keeps all four out of every phase's `:auto`
-      set independently -- two layers, not one."
+      of issuing an identity; authorising a release is the moment money
+      leaves toward sellers; a refund is the moment it leaves toward the
+      buyer. `:record-payment-capture` is here for a different reason worth
+      stating plainly: it writes THE EVIDENCE THE FUNDS GATE STANDS ON. An
+      actor that could auto-commit its own payment evidence would be an
+      actor that can unlock check 7 by itself, which is not a gate. None of
+      the five may EVER become auto-commit-eligible; `settleops.phase`
+      keeps all five out of every phase's `:auto` set independently --
+      two layers, not one."
   (:require [clojure.string :as str]
             [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]
@@ -94,11 +103,12 @@
   scope violation, not merely un-implemented. `:propose-release`
   AUTHORISES a transfer for a rail to perform; it does not perform one."
   #{:plan-settlement :bind-payout-destination :open-escrow
-    :propose-release :flag-settlement-concern :record-payment-capture})
+    :propose-release :flag-settlement-concern :record-payment-capture
+    :propose-refund})
 
 (def always-escalate-ops
   #{:bind-payout-destination :propose-release :flag-settlement-concern
-    :record-payment-capture})
+    :record-payment-capture :propose-refund})
 
 (def scope-excluded-terms
   "Case-insensitive substrings marking a proposal as claiming to have
@@ -253,6 +263,71 @@
                            (:plan/buyer-charge-minor plan) " "
                            (:plan/currency plan) " と一致しない")}]))))))
 
+(defn- escrows-for-order
+  "Every escrow this store holds over `order`. Escrows are keyed by escrow
+  id, so a refund -- which knows only the order -- has to look across them."
+  [st order]
+  (filter #(= (str order) (str (:escrow/basket %))) (store/all-escrows st)))
+
+(defn- refund-violations
+  "HARD check 9. A refund gives the BUYER money back, so the two things
+  that must not be true are: there is nothing to give back, and it has
+  already gone somewhere else.
+
+  The amount is checked against the STORED capture through
+  `acceptance/refund-instruction`, whose ceiling is what is still held --
+  so a second full refund is refused rather than paying the same money back
+  twice. Attribution is NOT checked here: the approver's name is stamped by
+  `:request-approval` and does not exist yet at governance time. The store
+  refuses to book an unattributed refund instead."
+  [proposal st]
+  (when (= :propose-refund (:op proposal))
+    (let [{:keys [order amount-minor]} (:value proposal)
+          a (store/acceptance st order)
+          released (filter #(= :released (:escrow/state %)) (escrows-for-order st order))
+          disputed (filter #(= :disputed (:escrow/state %)) (escrows-for-order st order))]
+      (cond
+        (str/blank? (str order))
+        [{:rule :refund-order-missing :detail "返金対象の注文が特定できない"}]
+
+        (nil? a)
+        [{:rule :refund-without-capture
+          :detail (str order " について入金の記録がない -- 返す対象が存在しない")}]
+
+        ;; Money that already left to sellers cannot also go back to the
+        ;; buyer: that is paying twice. Once a release is authorised the
+        ;; correction path is a dispute or a chargeback, not this op.
+        (seq released)
+        [{:rule :refund-after-release
+          :detail (str "escrow " (pr-str (mapv :escrow/id released))
+                       " は既に解放済み -- 出品者に渡った金を買い手にも返すことはできない")}]
+
+        ;; Refunding a disputed escrow IS deciding the dispute, and no actor
+        ;; in this fleet adjudicates (ADR-2607264000 D5).
+        (seq disputed)
+        [{:rule :refund-resolves-dispute
+          :detail (str "escrow " (pr-str (mapv :escrow/id disputed))
+                       " は係争中 -- 返金による解決は resolve-dispute（人間の裁定）のみ")}]
+
+        (not (and (integer? amount-minor) (pos? amount-minor)))
+        [{:rule :refund-amount-invalid
+          :detail (str "返金額は正の整数（最小単位）でなければならない: "
+                       (pr-str amount-minor))}]
+
+        ;; A probe with a placeholder approver: if the library will not build
+        ;; the instruction, the reason is the amount or the state, and both
+        ;; are decidable now rather than after a human approves.
+        (nil? (accept/refund-instruction a {:amount-minor amount-minor
+                                            :requested-by "governor-probe"}))
+        (if (= :captured (:accept/state a))
+          [{:rule :refund-exceeds-held
+            :detail (str "返金額 " amount-minor " が保持額 "
+                         (accept/net-captured-minor a) " を超える"
+                         "（既に返金済み " (accept/refunded-minor a) "）")}]
+          [{:rule :refund-without-capture
+            :detail (str "入金の状態は " (pr-str (:accept/state a))
+                         " -- 返す対象が残っていない")}])))))
+
 (defn- capture-violations
   "HARD check 8. A `:record-payment-capture` proposal must be one
   `marketplace.acceptance` would actually produce.
@@ -353,6 +428,7 @@
                            (release-violations proposal store now)
                            (payment-violations proposal store)
                            (capture-violations proposal store)
+                           (refund-violations proposal store)
                            (destination-violations proposal)
                            (effect-not-propose-violations proposal)
                            (scope-exclusion-violations proposal)))

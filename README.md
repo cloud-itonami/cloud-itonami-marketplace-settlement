@@ -61,7 +61,7 @@ The per-order fixed fee is charged to the **buyer on top of goods**, not
 skimmed from the sellers' side — so `:plan/buyer-charge-minor` exceeds
 `:plan/gross-minor`, and conservation is still checked against goods.
 
-## Eight HARD checks (permanent, un-overridable)
+## Nine HARD checks (permanent, un-overridable)
 
 | Check | What it catches |
 |---|---|
@@ -73,6 +73,7 @@ skimmed from the sellers' side — so `:plan/buyer-charge-minor` exceeds
 | **Scope exclusion** | any claim to have moved funds; any op outside the allowlist |
 | **Funds not arrived** | on a custodial flow, opening an escrow or authorising a release with no PSP-attested capture that settles the plan exactly |
 | **Capture not derivable** | a payment record that `marketplace.acceptance` would refuse — a buyer's screenshot, an expired code, a bound-amount mismatch |
+| **Refund has nothing to come from** | a refund with no capture, after the escrow released, on a disputed escrow, or above what is still held |
 
 ### The funds gate
 
@@ -95,6 +96,27 @@ which owes the buyer a refund first.
 The gate reads the **store**, never the proposal. A proposal asserting
 `{:paid? true}` is worth exactly what one asserting `:payout/verified?` is
 worth, which is nothing.
+
+### Refunds close the gate behind them
+
+`:propose-refund` gives money back to the **buyer**, and the refusals are
+the mirror image of the release ones:
+
+- **after a release** → refused. That money went to the sellers; paying the
+  buyer as well is paying twice, and the correction path is a dispute or a
+  chargeback, not this op.
+- **on a disputed escrow** → refused. Refunding *is* deciding the dispute,
+  and no actor here adjudicates.
+- **above what is still held** → refused. The ceiling is
+  `net-captured-minor` (captured − already refunded), so two refunds of
+  half each are fine and two of the full amount are not.
+
+A booked refund flows straight back into the funds gate, because
+`settlement-status` reads the net figure: a partial refund makes the order
+`:short`, a full one makes it `:missing`, and the release that capture
+would have funded stops being authorisable. The instruction itself is
+**derived by the store** from the stored capture plus the approver's name —
+an unattributed refund books nothing at all.
 
 `:payout/verified?` is read from the store, never from the proposal. An
 unverified destination is caught **before approval**, not discovered at
@@ -124,6 +146,7 @@ established (ADR-2607264000 D5): *no actor adjudicates.*
 | `:bind-payout-destination` | **never** | decides *where* a seller's money goes — the money-equivalent of issuing an identity |
 | `:propose-release` | **never** | decides *when* money leaves — planning is reversible, releasing is not |
 | `:record-payment-capture` | **never** | writes the evidence the funds gate reads. It moves nothing, which is exactly what makes it look safe to automate — an actor that can write its own payment evidence can unlock its own release |
+| `:propose-refund` | **never** | decides *when* money leaves toward the buyer — the mirror of a release, and writable only where release is (phase 3) |
 | `:flag-settlement-concern` | **never** | the step before a human looks |
 
 Both the governor's `always-escalate-ops` and every phase's `:auto` set
@@ -187,10 +210,18 @@ Every test injects a recording stub. **No transfer has been executed
 from this repository.**
 
 ```bash
-clojure -M:dev:run   # split, unverified destination, the funds gate, human-gated release
-clojure -M:test      # 103 tests, 392 assertions
+clojure -M:dev:run   # split, unverified destination, the funds gate, human-gated
+                     # release, and a refund refused after that release
+clojure -M:test      # JVM — 122 tests, 477 assertions
+npm ci && npm run test:cljs   # ClojureScript on Node — the SAME 122 / 477
 clojure -M:lint
 ```
+
+Every namespace except `settleops.edge.worker` is `.cljc`, and CLAUDE.md's
+runtime priority puts ClojureScript above the JVM — so the suite runs on
+both rather than asserting portability. `governor_test` was `.clj` and is
+now `.cljc` for that reason: it is the namespace whose refusals matter
+most, and it was the one the cljs run could not see.
 
 ## Rollout phases
 
@@ -199,7 +230,7 @@ clojure -M:lint
 | 0 read-only | — | — |
 | 1 assisted-planning | `:plan-settlement` `:record-payment-capture` | — |
 | 2 assisted-escrow | + `:open-escrow` | — |
-| 3 supervised-auto | all | `:plan-settlement` `:open-escrow` |
+| 3 supervised-auto | all (incl. `:propose-release` `:propose-refund`) | `:plan-settlement` `:open-escrow` |
 
 `:record-payment-capture` is writable from phase 1, alongside planning,
 because from phase 2 on an escrow **cannot** open on a custodial flow

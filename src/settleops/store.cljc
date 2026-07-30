@@ -46,6 +46,8 @@
   (acceptance [s order-id] "PSP-attested capture for an order, or nil. nil means
     NOT RECORDED -- it never means unpaid-is-fine, and the governor refuses on it.")
   (all-acceptances [s])
+  (refunds [s order-id] "Refund instructions booked against an order, oldest first.")
+  (all-refunds [s])
   (fee-schedule [s] "The operator's published commission schedule.")
   (operator [s] "The operator's own payout identity.")
   (ledger [s])
@@ -99,6 +101,7 @@
    ;; Deliberately EMPTY: no order starts out paid. The funds gate is only
    ;; a gate if the fixtures make it fire.
    :acceptances {}
+   :refunds {}
    :fee-schedule (settle/fee-schedule {:commission-bps 1000 :fixed-minor 50
                                        :payout-hold-days 7})
    :operator "merchant.marketplace-operator"})
@@ -117,6 +120,8 @@
   (delivered? [_ id] (boolean (get-in @a [:deliveries id])))
   (acceptance [_ id] (get-in @a [:acceptances id]))
   (all-acceptances [_] (sort-by :accept/order (vals (:acceptances @a))))
+  (refunds [_ id] (vec (get-in @a [:refunds id])))
+  (all-refunds [_] (vec (mapcat val (sort-by key (:refunds @a)))))
   (fee-schedule [_] (:fee-schedule @a))
   (operator [_] (:operator @a))
   (ledger [_] (:ledger @a))
@@ -151,6 +156,25 @@
         (when-let [c (accept/capture (:request value) (:attestation value))]
           (swap! a assoc-in [:acceptances (:accept/order c)] c))
 
+        ;; A refund is built from the STORED capture and the APPROVER's name,
+        ;; then booked with `acceptance/apply-refund` so the funds gate sees
+        ;; it. Both halves refuse rather than half-write: no approver means
+        ;; no instruction, and an instruction the library will not book
+        ;; leaves the acceptance untouched.
+        :propose-refund
+        (let [order (:order value)
+              current (get-in @a [:acceptances order])
+              instruction (accept/refund-instruction
+                           current {:amount-minor (:amount-minor value)
+                                    :reason (:reason value)
+                                    :requested-by (:approved-by payload)
+                                    :requested-at (:requested-at value)})
+              booked (when instruction (accept/apply-refund current instruction))]
+          (when booked
+            (swap! a #(-> %
+                          (assoc-in [:acceptances order] booked)
+                          (update-in [:refunds order] (fnil conj []) instruction)))))
+
         ;; A release NEVER moves money here. It records that a human
         ;; authorised one; a rail adapter reads the released escrow and
         ;; performs the transfer outside this actor.
@@ -169,7 +193,7 @@
 
 (defn mem-store [m]
   (->MemStore (atom (merge {:destinations {} :baskets {} :plans {} :escrows {}
-                            :deliveries {} :acceptances {}
+                            :deliveries {} :acceptances {} :refunds {}
                             :ledger [] :settlement-log []
                             :fee-schedule (settle/fee-schedule {:commission-bps 1000})
                             :operator "merchant.marketplace-operator"}
@@ -218,6 +242,10 @@
     (boolean (:delivered (persist/get-doc (persist/ctx st :delivery :id) (str id)))))
   (acceptance [_ id] (persist/get-doc (persist/ctx st :acceptance :accept/order) (str id)))
   (all-acceptances [_] (persist/all-docs (persist/ctx st :acceptance :accept/order)))
+  (refunds [_ id]
+    (vec (filter #(= (str id) (str (:refund/order %)))
+                 (persist/read-events (persist/stream-ctx st :refunds)))))
+  (all-refunds [_] (vec (persist/read-events (persist/stream-ctx st :refunds))))
   (fee-schedule [_] (:config/value (persist/get-doc (persist/ctx st :config :config/id) "fee-schedule")))
   (operator [_] (:config/value (persist/get-doc (persist/ctx st :config :config/id) "operator")))
   (durable? [_] (not (:persist/memory? st)))
@@ -248,6 +276,23 @@
         :record-payment-capture
         (when-let [c (accept/capture (:request value) (:attestation value))]
           (persist/put-doc! (persist/ctx st :acceptance :accept/order) c))
+
+        ;; Same two refusals as the MemStore: no approver, no instruction;
+        ;; an unbookable instruction leaves the acceptance untouched. The
+        ;; refund stream is append-only -- a refund is an event, not a
+        ;; mutable figure.
+        :propose-refund
+        (let [order (:order value)
+              current (acceptance this order)
+              instruction (accept/refund-instruction
+                           current {:amount-minor (:amount-minor value)
+                                    :reason (:reason value)
+                                    :requested-by (:approved-by payload)
+                                    :requested-at (:requested-at value)})
+              booked (when instruction (accept/apply-refund current instruction))]
+          (when booked
+            (persist/put-doc! (persist/ctx st :acceptance :accept/order) booked)
+            (persist/append-event! (persist/stream-ctx st :refunds) seed instruction)))
 
         ;; A release NEVER moves money here. It records that a human
         ;; authorised one; a rail adapter reads the released escrow and

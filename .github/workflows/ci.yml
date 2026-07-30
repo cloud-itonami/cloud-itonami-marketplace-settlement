@@ -33,3 +33,25 @@ jobs:
         with: { cli: latest }
       - name: test
         run: clojure -M:test
+
+  # The same portable .cljc suite under a real ClojureScript host. CLAUDE.md's
+  # runtime priority puts cljs above the JVM, and until this existed
+  # "portable" was an assertion nobody checked.
+  #
+  # NOTE: this fleet's GitHub Actions are not currently executing
+  # (ADR-2607300900 moved CI to the murakumo fleet), so read this as
+  # declaring the gate, not as evidence it ran. Locally:
+  #   npm ci && npm run test:cljs
+  test-cljs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - uses: DeLaGuardo/setup-clojure@13.4
+        with: { cli: latest }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: npm ci
+      - name: test (ClojureScript on Node)
+        run: npm run test:cljs
