@@ -1,5 +1,14 @@
 # cloud-itonami-marketplace-settlement
 
+**Maturity**: :implemented — mirroring what `blueprint.edn` already
+declares (`:itonami.blueprint/maturity :implemented`), stated here so the
+fleet's maturity scan reads the declaration instead of guessing from
+prose. Implemented means the actor, its governor and its rail adapter
+exist and are tested; it does **not** mean money has moved. **No transfer
+has ever been executed from this repository** (see *Nothing here moves
+money* below), and the deployed Worker is the read/propose surface, not a
+payment rail.
+
 Open Business Blueprint (implemented actor): **one buyer payment becomes
 N seller payouts — without the operator ever taking custody.**
 
@@ -154,7 +163,7 @@ from this repository.**
 
 ```bash
 clojure -M:dev:run   # multi-seller split, blocked destination, human-gated release
-clojure -M:test      # 46 tests, 134 assertions
+clojure -M:test      # 84 tests, 311 assertions
 clojure -M:lint
 ```
 

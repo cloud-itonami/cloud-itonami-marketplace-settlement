@@ -1,0 +1,90 @@
+(ns settleops.rail.client-test
+  "Request-shaping edges of the only I/O namespace in this repo. The
+  release-path tests (dry-run default, named authoriser, idempotency key,
+  x402 refusal) live in `settleops.rail-test` alongside the instructions
+  they act on; what is pinned here is how requests are BUILT and how a
+  rail's answer is read.
+
+  Nothing here reaches the network: every `http` is a stub, and the
+  read-only functions take a body that was handed to them."
+  (:require [clojure.test :refer [deftest is testing]]
+            [settleops.rail.client :as client]))
+
+;; ───────────────────────── x402 read request ─────────────────────────
+
+(deftest the-settlements-request-is-a-get-with-no-body
+  (let [r (client/x402-settlements-request {:seller "merchant.alpha"})]
+    (is (= :get (:method r)))
+    (is (= (str client/default-x402-base "/admin/settlements/merchant.alpha") (:url r)))
+    (is (not (contains? r :body)) "a read request has nothing to send")
+    (is (= {"accept" "application/json"} (:headers r))
+        "no credential is attached unless the caller supplies one")))
+
+(deftest since-and-token-are-only-present-when-given
+  (let [r (client/x402-settlements-request {:base "https://x402.test" :seller "s"
+                                           :since "2026-06-01" :token "tok"})]
+    (is (= "https://x402.test/admin/settlements/s?since=2026-06-01" (:url r)))
+    (is (= "Bearer tok" (get (:headers r) "authorization"))))
+  (testing "and absent ones add nothing rather than an empty value"
+    (let [r (client/x402-settlements-request {:seller "s"})]
+      (is (not (re-find #"\?" (:url r))))
+      (is (nil? (get (:headers r) "authorization"))))))
+
+;; ───────────────────────── reading a rail's answer ─────────────────────────
+
+(deftest a-settlements-body-is-read-with-either-key-style
+  (testing "a JSON body parsed with string keys must not read as zero settled"
+    (is (= {"s" 300} (client/observed-from-x402
+                      "s" {"settlements" [{:amount-minor 100} {:amount-minor 200}]}
+                      :amount-minor)))
+    (is (= {"s" 300} (client/observed-from-x402
+                      "s" {:settlements [{:amount-minor 100} {:amount-minor 200}]}
+                      :amount-minor))))
+  (testing "a body with no settlements key is zero settled, which reconcile calls :short"
+    (is (= {"s" 0} (client/observed-from-x402 "s" {} :amount-minor)))
+    (is (= {"s" 0} (client/observed-from-x402 "s" {:settlements []} :amount-minor))))
+  (testing "entries the amount-fn cannot read are skipped, not counted as zero"
+    (is (= {"s" 100} (client/observed-from-x402
+                      "s" {:settlements [{:amount-minor 100} {:other 1}]}
+                      :amount-minor))))
+  (testing "the wire unit is the rail's business, so the caller states how to read it"
+    (is (= {"s" 250} (client/observed-from-x402
+                      "s" {:settlements [{"amount" 250}]}
+                      #(get % "amount"))))))
+
+(deftest a-rail-that-answers-with-an-error-contributes-nothing
+  (testing "a 500 must not be read as 'nothing settled' -- the seller is :missing,
+            which reconcile reports differently from a zero"
+    (let [calls (atom [])
+          http (fn [req] (swap! calls conj req) {:status 500 :body {:error "boom"}})
+          insts [{:instruction/seller "merchant.alpha" :instruction/rail :x402}]]
+      (is (= {} (client/fetch-observed http insts {})))
+      (is (= 1 (count @calls)) "it was asked; the answer was simply not usable"))))
+
+(deftest only-the-x402-sellers-are-queried
+  (let [calls (atom [])
+        http (fn [req] (swap! calls conj req) {:status 200 :body {:settlements []}})
+        insts [{:instruction/seller "a" :instruction/rail :x402}
+               {:instruction/seller "b" :instruction/rail :stripe}
+               {:instruction/seller "c" :instruction/rail :bank-transfer}]]
+    (client/fetch-observed http insts {})
+    (is (= 1 (count @calls)))
+    (is (re-find #"/admin/settlements/a$" (:url (first @calls))))))
+
+;; ───────────────────────── stripe request shaping ─────────────────────────
+
+(deftest the-transfer-body-is-deterministic-and-form-encoded
+  (let [i {:instruction/escrow "esc-1" :instruction/seller "merchant.beta"
+           :instruction/to "acct_beta" :instruction/amount-minor 2970
+           :instruction/currency "JPY" :instruction/kind :transfer}
+        r (client/stripe-transfer-request {:instruction i})]
+    (is (= "amount=2970&currency=jpy&destination=acct_beta&transfer_group=esc-1" (:body r))
+        "key order is sorted, so two runs produce the same request bytes")
+    (is (= "application/x-www-form-urlencoded" (get (:headers r) "content-type")))
+    (testing "the idempotency key is present even with no secret configured"
+      (is (= "mp-esc-1-merchant.beta" (get (:headers r) "idempotency-key")))
+      (is (nil? (get (:headers r) "authorization"))))
+    (testing "the base is overridable so a test never points at api.stripe.com"
+      (is (= "https://stripe.test/transfers"
+             (:url (client/stripe-transfer-request {:base "https://stripe.test"
+                                                    :instruction i})))))))
