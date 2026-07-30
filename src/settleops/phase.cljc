@@ -11,12 +11,13 @@
                                    `:plan-settlement` and `:open-escrow`
                                    may auto-commit.
 
-  `:bind-payout-destination`, `:propose-release` and
-  `:flag-settlement-concern` are deliberately ABSENT from every phase's
-  `:auto` set, INCLUDING phase 3 -- a permanent structural fact, not a
-  rollout milestone still to come.
+  `:bind-payout-destination`, `:propose-release`,
+  `:flag-settlement-concern` and `:record-payment-capture` are
+  deliberately ABSENT from every phase's `:auto` set, INCLUDING phase 3 --
+  a permanent structural fact, not a rollout milestone still to come.
 
-  The two that matter are the two that decide about money:
+  The three that matter are the two that decide about money and the one
+  that decides what counts as proof it arrived:
 
     - `:bind-payout-destination` decides WHERE a seller's money goes.
       Getting it wrong sends funds to an address nobody controls, or to
@@ -25,9 +26,14 @@
       the same reason.
     - `:propose-release` decides WHEN money leaves. Computing a plan is
       reversible (recompute it); releasing is not.
+    - `:record-payment-capture` writes the evidence the governor's funds
+      gate reads. It moves nothing, which makes it look auto-committable,
+      and that appearance is the trap: an actor that can write its own
+      payment evidence can open its own escrow and authorise its own
+      release. A gate whose input the gated party controls is not a gate.
 
-  Everything auto-committable here is a COMPUTATION or a RECORD. Nothing
-  auto-committable moves value. `settleops.governor`'s own
+  Everything auto-committable here is a COMPUTATION or a RECORD that
+  nothing else is gated on. Nothing auto-committable moves value. `settleops.governor`'s own
   `always-escalate-ops` enforces the same invariant independently --
   two layers, not one, agree on this."
   (:require [settleops.governor :as governor]))
@@ -35,15 +41,24 @@
 (def read-ops #{})
 (def write-ops governor/allowed-ops)
 
-;; NOTE the invariant: the three money-deciding ops are members of
-;; `write-ops` (governor-gated like any write) but are NEVER members of
-;; any phase's `:auto` set below. Do not add them there.
+;; NOTE the invariant: the four ops above are members of `write-ops`
+;; (governor-gated like any write) but are NEVER members of any phase's
+;; `:auto` set below. Do not add them there.
+;;
+;; `:record-payment-capture` is writable from phase 1 alongside planning,
+;; because from phase 2 on an escrow CANNOT open on a custodial flow until
+;; a capture is recorded (governor check 7) -- enabling the gated op
+;; without the op that satisfies the gate would ship a phase that can only
+;; refuse.
 (def phases
   "phase -> {:label .. :writes <ops allowed to write> :auto <ops allowed
   to auto-commit when governor-clean>}."
   {0 {:label "read-only"         :writes #{}                    :auto #{}}
-   1 {:label "assisted-planning" :writes #{:plan-settlement}     :auto #{}}
-   2 {:label "assisted-escrow"   :writes #{:plan-settlement :open-escrow} :auto #{}}
+   1 {:label "assisted-planning" :writes #{:plan-settlement :record-payment-capture}
+      :auto #{}}
+   2 {:label "assisted-escrow"   :writes #{:plan-settlement :record-payment-capture
+                                           :open-escrow}
+      :auto #{}}
    3 {:label "supervised-auto"   :writes write-ops
       :auto #{:plan-settlement :open-escrow}}})
 

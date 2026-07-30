@@ -2,10 +2,10 @@
   "SettlementAdvisor -- the *contained intelligence node* for the
   marketplace settlement actor.
 
-  It drafts exactly five kinds of proposal from a closed allowlist:
+  It drafts exactly six kinds of proposal from a closed allowlist:
   computing a settlement plan for a basket, binding a seller's payout
-  destination, opening an escrow, authorising a release, and flagging a
-  settlement concern.
+  destination, opening an escrow, authorising a release, recording a
+  PSP-attested payment capture, and flagging a settlement concern.
 
   CRITICAL: it is a smart-but-untrusted advisor, and this is the actor
   where that matters most, because the subject is money. Every
@@ -92,6 +92,29 @@
    :value     {:escrow-id (:escrow-id patch) :basket-id basket-id}
    :confidence (or (:confidence patch) 0.87)})
 
+(defn- propose-payment-capture
+  "Relay a capture the HOST observed -- a PSP webhook or the answer to a
+  PSP query -- as a proposal to record it.
+
+  The advisor invents nothing here and cannot: the request and the
+  attestation come in on the patch, `settleops.governor` re-derives them
+  through `marketplace.acceptance/capture-errors`, and the store writes
+  what the library derives rather than what this proposal claims. Always
+  escalates, because this is the evidence the funds gate stands on."
+  [_st {:keys [patch]}]
+  (let [{:keys [request attestation]} patch
+        order (:accept/order request)]
+    {:op        :record-payment-capture
+     :basket-id order
+     :summary   (str order " の入金記録を提案: " (pr-str (:psp/amount-minor attestation))
+                     " " (:psp/currency attestation)
+                     " / 出典 " (pr-str (:psp/source attestation)))
+     :rationale "PSP が attest した入金事実の記録のみ。資金の移動も返金の実行も行わない。買い手提示の画面は根拠にならない。"
+     :cites     (vec (keep identity [order (:psp/transaction-id attestation)]))
+     :effect    :propose
+     :value     {:order order :request request :attestation attestation}
+     :confidence (or (:confidence patch) 0.85)}))
+
 (defn- propose-settlement-concern
   [_st {:keys [basket-id patch]}]
   {:op        :flag-settlement-concern
@@ -110,6 +133,7 @@
                    :bind-payout-destination (propose-destination st request)
                    :open-escrow             (propose-escrow st request)
                    :propose-release         (propose-release st request)
+                   :record-payment-capture  (propose-payment-capture st request)
                    :flag-settlement-concern (propose-settlement-concern st request)
                    {})]
     ;; Test hook: inject scope-excluded content to exercise the

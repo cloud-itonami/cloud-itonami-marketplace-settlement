@@ -1,8 +1,10 @@
 (ns settleops.sim
   "Offline demo: compute a multi-seller settlement, watch an unverified
-  payout destination block a basket, and watch a release wait for a
-  human. `clojure -M:dev:run`."
+  payout destination block a basket, watch a release refused because
+  nobody recorded that the buyer paid, then record a PSP-attested capture
+  and watch the release wait for a human. `clojure -M:dev:run`."
   (:require [langgraph.graph :as g]
+            [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]
             [settleops.operation :as operation]
             [settleops.store :as store]))
@@ -12,6 +14,19 @@
 
 (defn- run-req! [actor tid request]
   (g/run* actor {:request request :context ctx} {:thread-id tid}))
+
+(defn- capture-patch
+  "A コード決済 capture for `basket`, as the host would hand it over after
+  a PSP webhook. `expected` is what the plan says the buyer owes."
+  [basket expected]
+  {:request (accept/payment-request
+             {:order basket :rail :code-payment :mode :mpm-dynamic
+              :psp "psp.demo" :expected-minor expected :currency "JPY"
+              :expires-at "2026-06-02T00:10:00Z" :reference "psp-ref-demo"})
+   :attestation (accept/psp-attestation
+                 {:psp "psp.demo" :transaction-id (str "psp-tx-" basket)
+                  :amount-minor expected :currency "JPY"
+                  :attested-at "2026-06-02T00:05:00Z" :source :webhook})})
 
 (defn -main [& _]
   (let [s (store/seed-db)
@@ -37,13 +52,35 @@
       (println "  disposition:" (:disposition (:state r)))
       (println "  violations :" (mapv :rule (:violations (last (store/ledger s))))))
 
-    (println "\n=== 3. エスクロー解放は必ず人間の承認を通る ===")
+    (println "\n=== 3. 入金の記録が無い解放は人間にすら聞かずに拒否 ===")
     (store/commit-record!
      s {:op :open-escrow
         :value {:escrow (settle/escrow {:id "esc-1" :plan (store/plan-for s "basket-1")
                                         :basket "basket-1"
                                         :opened-at "2026-06-01T00:00:00Z"
                                         :release-after "2026-06-08T00:00:00Z"})}})
+    (let [r (run-req! actor "sim-3a" {:op :propose-release :basket-id "basket-1"
+                                      :patch {:escrow-id "esc-1"}})]
+      (println "  status     :" (:status r))
+      (println "  disposition:" (:disposition (:state r)))
+      (println "  violations :" (mapv :rule (:violations (last (store/ledger s)))))
+      (println "  入金記録    :" (pr-str (store/acceptance s "basket-1"))))
+
+    (println "\n=== 3b. PSP が attest した入金を記録（これも人間の承認が必要）===")
+    (let [expected (:plan/buyer-charge-minor (store/plan-for s "basket-1"))
+          held (run-req! actor "sim-3b" {:op :record-payment-capture
+                                         :basket-id "basket-1"
+                                         :patch (capture-patch "basket-1" expected)})]
+      (println "  status     :" (:status held) "（自動コミットされない）")
+      (let [ok (g/run* actor {:approval {:status :approved :by "treasury-01"}}
+                       {:thread-id "sim-3b" :resume? true})
+            a (store/acceptance s "basket-1")]
+        (println "  status     :" (:status ok))
+        (println "  着金        :" (:accept/captured-minor a) "/ 請求" expected
+                 "→" (:status (accept/settlement-status a)))
+        (println "  出典        :" (:accept/attested-by a) "（買い手提示は拒否される）")))
+
+    (println "\n=== 3c. 入金が記録されたので解放が人間の承認を通る ===")
     (let [held (run-req! actor "sim-3" {:op :propose-release :basket-id "basket-1"
                                         :patch {:escrow-id "esc-1"}})]
       (println "  status     :" (:status held))

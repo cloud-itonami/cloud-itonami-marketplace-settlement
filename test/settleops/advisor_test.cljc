@@ -3,6 +3,7 @@
   the governor's own tests assume: every proposal is `:propose`-only, and
   the ARITHMETIC is not the advisor's opinion."
   (:require [clojure.test :refer [deftest is testing]]
+            [marketplace.acceptance :as accept]
             [settleops.advisor :as advisor]
             [settleops.governor :as governor]
             [settleops.store :as store]))
@@ -15,6 +16,15 @@
     :patch {:escrow-id "esc-9" :opened-at "2026-06-01T00:00:00Z"
             :release-after "2026-06-08T00:00:00Z"}}
    {:op :propose-release         :basket-id "basket-1" :patch {:escrow-id "esc-9"}}
+   {:op :record-payment-capture  :basket-id "basket-1"
+    :patch {:request (accept/payment-request
+                      {:order "basket-1" :rail :code-payment :mode :mpm-dynamic
+                       :psp "psp.test" :expected-minor 4550 :currency "JPY"
+                       :expires-at "2026-06-02T00:10:00Z"})
+            :attestation (accept/psp-attestation
+                          {:psp "psp.test" :transaction-id "psp-tx-1"
+                           :amount-minor 4550 :currency "JPY"
+                           :attested-at "2026-06-02T00:05:00Z" :source :webhook})}}
    {:op :flag-settlement-concern :basket-id "basket-1" :patch {:concern :short-payment}}])
 
 (deftest every-proposal-is-propose-only
@@ -30,8 +40,22 @@
   (testing "an op the advisor does not know produces nothing, not a guess"
     (is (= {} (advisor/infer (store/seed-db) {:op :transfer-funds})))
     (is (= {} (advisor/infer (store/seed-db) {:op nil}))))
-  (testing "and the five it does know are exactly the governor's allowlist"
+  (testing "and the six it does know are exactly the governor's allowlist"
     (is (= governor/allowed-ops (set (map :op ops))))))
+
+(deftest a-capture-proposal-relays-the-psp-and-invents-nothing
+  (let [request (:request (:patch (nth ops 4)))
+        attestation (:attestation (:patch (nth ops 4)))
+        p (advisor/infer (store/seed-db) (nth ops 4))]
+    (is (= :record-payment-capture (:op p)))
+    (is (= request (get-in p [:value :request])) "relayed verbatim")
+    (is (= attestation (get-in p [:value :attestation])))
+    (is (= "basket-1" (get-in p [:value :order])))
+    (testing "the PSP transaction is cited so the ledger can be reconciled"
+      (is (= ["basket-1" "psp-tx-1"] (:cites p))))
+    (testing "and the rationale does not claim anything was moved"
+      (is (= :propose (:effect p)))
+      (is (not (re-find #"送金|移動した|完了した" (:rationale p)))))))
 
 (deftest the-arithmetic-is-not-the-advisors-opinion
   (let [st (store/seed-db)

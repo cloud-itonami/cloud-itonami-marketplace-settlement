@@ -14,6 +14,14 @@
     escrows       escrow id -> escrow record.
     deliveries    basket id -> bool, delivery confirmation from the
                   fulfilment side. Escrow release requires it.
+    acceptances   order (= basket) id -> `marketplace.acceptance` record,
+                  the PSP-attested evidence that the BUYER's money
+                  actually arrived. Written only by
+                  `:record-payment-capture`, and the record stored is the
+                  one `acceptance/capture` derives -- never the proposal's
+                  own idea of what was captured. `settleops.governor`
+                  reads it as the funds gate, the same way it reads
+                  `:payout/verified?` from here rather than from a claim.
 
   This store holds NO money and no keys. It records intentions and
   outcomes; moving funds is a rail's job (`nexus-x402` for the on-chain
@@ -22,7 +30,8 @@
   and carries `:plan/custodial? false` to say so on the record itself.
 
   The ledger stays append-only."
-  (:require [marketplace.settlement :as settle]
+  (:require [marketplace.acceptance :as accept]
+            [marketplace.settlement :as settle]
             [marketplace.persist :as persist]))
 
 (defprotocol Store
@@ -34,6 +43,9 @@
   (escrow [s escrow-id])
   (all-escrows [s])
   (delivered? [s basket-id] "Delivery confirmation from the fulfilment side.")
+  (acceptance [s order-id] "PSP-attested capture for an order, or nil. nil means
+    NOT RECORDED -- it never means unpaid-is-fine, and the governor refuses on it.")
+  (all-acceptances [s])
   (fee-schedule [s] "The operator's published commission schedule.")
   (operator [s] "The operator's own payout identity.")
   (ledger [s])
@@ -84,6 +96,9 @@
    :deliveries {"basket-1" true "basket-2" true "basket-3" false}
    :plans {}
    :escrows {}
+   ;; Deliberately EMPTY: no order starts out paid. The funds gate is only
+   ;; a gate if the fixtures make it fire.
+   :acceptances {}
    :fee-schedule (settle/fee-schedule {:commission-bps 1000 :fixed-minor 50
                                        :payout-hold-days 7})
    :operator "merchant.marketplace-operator"})
@@ -100,6 +115,8 @@
   (escrow [_ id] (get-in @a [:escrows id]))
   (all-escrows [_] (sort-by :escrow/id (vals (:escrows @a))))
   (delivered? [_ id] (boolean (get-in @a [:deliveries id])))
+  (acceptance [_ id] (get-in @a [:acceptances id]))
+  (all-acceptances [_] (sort-by :accept/order (vals (:acceptances @a))))
   (fee-schedule [_] (:fee-schedule @a))
   (operator [_] (:operator @a))
   (ledger [_] (:ledger @a))
@@ -125,6 +142,15 @@
         (when-let [e (:escrow value)]
           (swap! a assoc-in [:escrows (:escrow/id e)] e))
 
+        ;; The capture is DERIVED here, not accepted as given: whatever the
+        ;; proposal claims was captured, what gets stored is what
+        ;; `acceptance/capture` produces from the request and the PSP's
+        ;; attestation. It returns nil for a buyer-presented claim, an
+        ;; expired code or a bound-amount mismatch, and nil writes nothing.
+        :record-payment-capture
+        (when-let [c (accept/capture (:request value) (:attestation value))]
+          (swap! a assoc-in [:acceptances (:accept/order c)] c))
+
         ;; A release NEVER moves money here. It records that a human
         ;; authorised one; a rail adapter reads the released escrow and
         ;; performs the transfer outside this actor.
@@ -143,7 +169,8 @@
 
 (defn mem-store [m]
   (->MemStore (atom (merge {:destinations {} :baskets {} :plans {} :escrows {}
-                            :deliveries {} :ledger [] :settlement-log []
+                            :deliveries {} :acceptances {}
+                            :ledger [] :settlement-log []
                             :fee-schedule (settle/fee-schedule {:commission-bps 1000})
                             :operator "merchant.marketplace-operator"}
                            m))))
@@ -189,6 +216,8 @@
   ;; the thing it gates would not be an independent check.
   (delivered? [_ id]
     (boolean (:delivered (persist/get-doc (persist/ctx st :delivery :id) (str id)))))
+  (acceptance [_ id] (persist/get-doc (persist/ctx st :acceptance :accept/order) (str id)))
+  (all-acceptances [_] (persist/all-docs (persist/ctx st :acceptance :accept/order)))
   (fee-schedule [_] (:config/value (persist/get-doc (persist/ctx st :config :config/id) "fee-schedule")))
   (operator [_] (:config/value (persist/get-doc (persist/ctx st :config :config/id) "operator")))
   (durable? [_] (not (:persist/memory? st)))
@@ -214,6 +243,11 @@
         :open-escrow
         (when-let [e (:escrow value)]
           (persist/put-doc! (persist/ctx st :escrow :escrow/id) e))
+
+        ;; Derived, not taken as given -- see the MemStore comment.
+        :record-payment-capture
+        (when-let [c (accept/capture (:request value) (:attestation value))]
+          (persist/put-doc! (persist/ctx st :acceptance :accept/order) c))
 
         ;; A release NEVER moves money here. It records that a human
         ;; authorised one; a rail adapter reads the released escrow and

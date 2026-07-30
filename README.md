@@ -61,7 +61,7 @@ The per-order fixed fee is charged to the **buyer on top of goods**, not
 skimmed from the sellers' side — so `:plan/buyer-charge-minor` exceeds
 `:plan/gross-minor`, and conservation is still checked against goods.
 
-## Six HARD checks (permanent, un-overridable)
+## Eight HARD checks (permanent, un-overridable)
 
 | Check | What it catches |
 |---|---|
@@ -71,6 +71,30 @@ skimmed from the sellers' side — so `:plan/buyer-charge-minor` exceeds
 | **Disputed escrow** | releasing a `:disputed` escrow, ever |
 | **Effect not `:propose`** | a proposal claiming to directly actuate |
 | **Scope exclusion** | any claim to have moved funds; any op outside the allowlist |
+| **Funds not arrived** | on a custodial flow, opening an escrow or authorising a release with no PSP-attested capture that settles the plan exactly |
+| **Capture not derivable** | a payment record that `marketplace.acceptance` would refuse — a buyer's screenshot, an expired code, a bound-amount mismatch |
+
+### The funds gate
+
+Until this existed, **an unpaid order could be released in full.** Release
+required delivery and an elapsed window; nothing asked whether the buyer's
+money had arrived. It now does, and the check is *rail-aware* because the
+two rails are genuinely different (see below):
+
+| Flow | Acceptance record required? | Why |
+|---|---|---|
+| x402 (`:direct-split`) | **no** | the buyer paid each seller's own treasury directly; there is no operator-side receipt to demand, and `reconcile` is the evidence |
+| stripe / bank-transfer / コード決済 PSP (`:transfer`) | **yes** | the money passed through the operator, so its arrival is a fact this actor can check — and must |
+
+A **missing** acceptance refuses (`:payment-not-recorded`). Unknown is not
+"probably fine": that asymmetry is the whole point. A short payment
+refuses too — paying sellers in full on a short payment pays the
+difference out of the operator's own money — and so does an overpayment,
+which owes the buyer a refund first.
+
+The gate reads the **store**, never the proposal. A proposal asserting
+`{:paid? true}` is worth exactly what one asserting `:payout/verified?` is
+worth, which is nothing.
 
 `:payout/verified?` is read from the store, never from the proposal. An
 unverified destination is caught **before approval**, not discovered at
@@ -91,7 +115,7 @@ There is deliberately no function that reads the evidence and computes
 an outcome. This preserves the fleet-wide invariant ISIC 4791
 established (ADR-2607264000 D5): *no actor adjudicates.*
 
-## The two money moments always need a human
+## The money moments always need a human
 
 | Op | Auto-committable? | Why |
 |---|---|---|
@@ -99,6 +123,7 @@ established (ADR-2607264000 D5): *no actor adjudicates.*
 | `:open-escrow` | yes | a record; moves nothing |
 | `:bind-payout-destination` | **never** | decides *where* a seller's money goes — the money-equivalent of issuing an identity |
 | `:propose-release` | **never** | decides *when* money leaves — planning is reversible, releasing is not |
+| `:record-payment-capture` | **never** | writes the evidence the funds gate reads. It moves nothing, which is exactly what makes it look safe to automate — an actor that can write its own payment evidence can unlock its own release |
 | `:flag-settlement-concern` | **never** | the step before a human looks |
 
 Both the governor's `always-escalate-ops` and every phase's `:auto` set
@@ -162,8 +187,8 @@ Every test injects a recording stub. **No transfer has been executed
 from this repository.**
 
 ```bash
-clojure -M:dev:run   # multi-seller split, blocked destination, human-gated release
-clojure -M:test      # 84 tests, 311 assertions
+clojure -M:dev:run   # split, unverified destination, the funds gate, human-gated release
+clojure -M:test      # 103 tests, 392 assertions
 clojure -M:lint
 ```
 
@@ -172,9 +197,14 @@ clojure -M:lint
 | Phase | Writes | Auto-commits |
 |---|---|---|
 | 0 read-only | — | — |
-| 1 assisted-planning | `:plan-settlement` | — |
+| 1 assisted-planning | `:plan-settlement` `:record-payment-capture` | — |
 | 2 assisted-escrow | + `:open-escrow` | — |
 | 3 supervised-auto | all | `:plan-settlement` `:open-escrow` |
 
-Everything auto-committable is a computation or a record. Nothing
-auto-committable moves value.
+`:record-payment-capture` is writable from phase 1, alongside planning,
+because from phase 2 on an escrow **cannot** open on a custodial flow
+until a capture is recorded. Enabling the gated op without the op that
+satisfies the gate would ship a phase that can only refuse.
+
+Everything auto-committable is a computation or a record **nothing else
+is gated on**. Nothing auto-committable moves value.
