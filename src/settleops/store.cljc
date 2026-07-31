@@ -15,6 +15,9 @@
     deliveries    basket id -> bool, delivery confirmation from the
                   fulfilment side. Escrow release requires it.
     acceptances   order (= basket) id -> `marketplace.acceptance` record,
+                  ONE per order: a second capture tops the first up rather
+                  than replacing it, so a buyer who paid twice is recorded
+                  once with the total.
                   the PSP-attested evidence that the BUYER's money
                   actually arrived. Written only by
                   `:record-payment-capture`, and the record stored is the
@@ -152,9 +155,20 @@
         ;; `acceptance/capture` produces from the request and the PSP's
         ;; attestation. It returns nil for a buyer-presented claim, an
         ;; expired code or a bound-amount mismatch, and nil writes nothing.
+        ;; A SECOND capture for the same order is a top-up, not a
+        ;; replacement. `assoc-in` alone would have overwritten the first
+        ;; and the money the buyer already sent would vanish from the
+        ;; figure the funds gate reads -- so the top-up path is taken
+        ;; whenever a capture already exists, and `apply-top-up` refuses
+        ;; anything that is not chasing THAT capture.
         :record-payment-capture
-        (when-let [c (accept/capture (:request value) (:attestation value))]
-          (swap! a assoc-in [:acceptances (:accept/order c)] c))
+        (let [order (:accept/order (:request value))
+              existing (get-in @a [:acceptances order])
+              booked (if existing
+                       (accept/apply-top-up existing (:request value) (:attestation value))
+                       (accept/capture (:request value) (:attestation value)))]
+          (when booked
+            (swap! a assoc-in [:acceptances (:accept/order booked)] booked)))
 
         ;; A refund is built from the STORED capture and the APPROVER's name,
         ;; then booked with `acceptance/apply-refund` so the funds gate sees
@@ -272,10 +286,16 @@
         (when-let [e (:escrow value)]
           (persist/put-doc! (persist/ctx st :escrow :escrow/id) e))
 
-        ;; Derived, not taken as given -- see the MemStore comment.
+        ;; Derived, not taken as given, and a second capture tops up
+        ;; rather than replacing -- see the MemStore comment.
         :record-payment-capture
-        (when-let [c (accept/capture (:request value) (:attestation value))]
-          (persist/put-doc! (persist/ctx st :acceptance :accept/order) c))
+        (let [order (:accept/order (:request value))
+              existing (acceptance this order)
+              booked (if existing
+                       (accept/apply-top-up existing (:request value) (:attestation value))
+                       (accept/capture (:request value) (:attestation value)))]
+          (when booked
+            (persist/put-doc! (persist/ctx st :acceptance :accept/order) booked)))
 
         ;; Same two refusals as the MemStore: no approver, no instruction;
         ;; an unbookable instruction leaves the acceptance untouched. The

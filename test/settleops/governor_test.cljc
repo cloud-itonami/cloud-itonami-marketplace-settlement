@@ -432,3 +432,57 @@
                                      :patch {:amount-minor 4550 :reason "未着"}})]
     (is (false? (:hard? v)) (pr-str (:violations v)))
     (is (true? (:high-stakes? v)))))
+
+;; ───────────────────── a second capture (HARD 8) ─────────────────────
+
+(defn- short-capture-value [st basket amount]
+  {:order basket
+   :request (accept/payment-request
+             {:order basket :rail :code-payment :mode :mpm-static :psp "psp.test"
+              :expected-minor (:plan/buyer-charge-minor (store/plan-for st basket))
+              :currency "JPY"})
+   :attestation (accept/psp-attestation
+                 {:psp "psp.test" :transaction-id "psp-tx-1" :amount-minor amount
+                  :currency "JPY" :attested-at "2026-06-02T00:05:00Z" :source :webhook})})
+
+(deftest a-second-capture-must-be-a-top-up-of-the-first
+  (let [st (db)]
+    (store/commit-record! st {:op :record-payment-capture
+                              :value (short-capture-value st "basket-1" 550)})
+    (testing "a fresh capture for an order that already has one is refused —
+              the store would be asked to replace a payment already made"
+      (is (contains? (rules (check-capture st (short-capture-value st "basket-1" 4550)))
+                     :duplicate-capture)))
+    (testing "a genuine top-up passes"
+      (let [t (accept/top-up-request (store/acceptance st "basket-1")
+                                     {:expires-at "2026-06-03T00:10:00Z"})
+            v {:order "basket-1" :request t
+               :attestation (accept/psp-attestation
+                             {:psp "psp.test" :transaction-id "psp-tx-2"
+                              :amount-minor 4000 :currency "JPY"
+                              :attested-at "2026-06-03T00:05:00Z" :source :webhook})}]
+        (is (false? (:hard? (check-capture st v))) (pr-str (:violations (check-capture st v))))
+        (testing "an amount that is not the shortfall is named precisely —
+                  the bound-amount check gets there first, which is the
+                  better diagnosis"
+          (is (contains? (rules (check-capture st (assoc-in v [:attestation :psp/amount-minor] 1)))
+                         :bound-amount-mismatch)))))))
+
+(deftest a-top-up-of-a-refunded-capture-has-nothing-to-top-up
+  (testing "capture-errors pass, and the library still will not book it —
+            :top-up-not-derivable is the last line rather than a silent no-op"
+    (let [st (db)]
+      (store/commit-record! st {:op :record-payment-capture
+                                :value (short-capture-value st "basket-1" 550)})
+      (let [t (accept/top-up-request (store/acceptance st "basket-1")
+                                     {:expires-at "2026-06-03T00:10:00Z"})]
+        (store/commit-record! st {:op :propose-refund
+                                  :value {:order "basket-1" :amount-minor 550}
+                                  :payload {:approved-by "treasury-01"}})
+        (is (= :refunded (:accept/state (store/acceptance st "basket-1"))))
+        (let [v {:order "basket-1" :request t
+                 :attestation (accept/psp-attestation
+                               {:psp "psp.test" :transaction-id "psp-tx-2"
+                                :amount-minor 4000 :currency "JPY"
+                                :attested-at "2026-06-03T00:05:00Z" :source :webhook})}]
+          (is (contains? (rules (check-capture st v)) :top-up-not-derivable)))))))
