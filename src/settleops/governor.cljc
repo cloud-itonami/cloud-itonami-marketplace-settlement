@@ -65,7 +65,11 @@
                                    own `capture-errors`, so a buyer's
                                    screenshot, an expired code or a
                                    bound-amount mismatch is refused before
-                                   a human is asked to approve it.
+                                   a human is asked to approve it. A SECOND
+                                   capture for an order is admissible only
+                                   as a top-up of the first: anything else
+                                   would replace a payment the buyer
+                                   already made.
     9. Refund has nothing to    -- a refund needs money STILL HELD. Refused
        come from                   when there is no capture, when the escrow
                                    already released (that money went to
@@ -366,10 +370,30 @@
           :detail (str "request の order " (pr-str order) " と提案の order "
                        (pr-str (get-in proposal [:value :order])) " が一致しない")}]
 
+        ;; A capture already exists for this order. A second one is only
+        ;; admissible as a TOP-UP of that capture -- otherwise the store
+        ;; would be asked to replace a payment the buyer already made, and
+        ;; the first amount would vanish from the funds gate.
+        (and (store/acceptance st order)
+             (not= (:accept/tops-up request)
+                   (:accept/psp-transaction (store/acceptance st order))))
+        [{:rule :duplicate-capture
+          :detail (str order " には既に入金記録がある"
+                       "（不足分を追う場合は acceptance/top-up-request を使う）")}]
+
+        (and (store/acceptance st order)
+             (nil? (accept/apply-top-up (store/acceptance st order) request
+                                        (:attestation (:value proposal)))))
+        [{:rule :top-up-not-derivable
+          :detail (str "不足分の追加入金として成立しない"
+                       "（追う対象・金額・出典のいずれかが一致しない）")}]
+
         ;; If a plan is already committed for this order, the amount being
-        ;; captured must be the amount that plan says the buyer owes.
+        ;; captured must be the amount that plan says the buyer owes. A
+        ;; top-up asks for the shortfall, not the whole charge, so this
+        ;; applies to the FIRST capture only.
         :else
-        (when-let [p (store/plan st order)]
+        (when-let [p (and (nil? (store/acceptance st order)) (store/plan st order))]
           (when-not (accept/covers-plan? request p)
             [{:rule :payment-does-not-cover-plan
               :detail (str "請求額 " (:accept/expected-minor request)

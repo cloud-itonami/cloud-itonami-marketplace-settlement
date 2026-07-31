@@ -97,6 +97,22 @@ The gate reads the **store**, never the proposal. A proposal asserting
 `{:paid? true}` is worth exactly what one asserting `:payout/verified?` is
 worth, which is nothing.
 
+### A short payment can be chased
+
+`:mpm-static` carries no amount, so a buyer can type one too few digits.
+That used to be reported as `:short` and left there. Now
+`acceptance/shortfall-minor` names what is owed, `top-up-request` builds a
+second code for exactly that (bound to the amount, so the mistake cannot
+repeat), and a second capture **tops the first up rather than replacing
+it** — one record per order carrying the total, with both PSP transaction
+ids kept.
+
+That last part was a live defect: the store wrote captures with
+`assoc-in`, so a second capture for an order silently erased the first,
+and the money the buyer had already sent vanished from the figure the
+funds gate reads. A second capture that is not a top-up of the first is
+now refused by name (`:duplicate-capture`).
+
 ### Refunds close the gate behind them
 
 `:propose-refund` gives money back to the **buyer**, and the refusals are
@@ -212,8 +228,8 @@ from this repository.**
 ```bash
 clojure -M:dev:run   # split, unverified destination, the funds gate, human-gated
                      # release, and a refund refused after that release
-clojure -M:test      # JVM — 122 tests, 477 assertions
-npm ci && npm run test:cljs   # ClojureScript on Node — the SAME 122 / 477
+clojure -M:test      # JVM — 126 tests, 489 assertions
+npm ci && npm run test:cljs   # ClojureScript on Node — the SAME 126 / 489
 clojure -M:lint
 ```
 

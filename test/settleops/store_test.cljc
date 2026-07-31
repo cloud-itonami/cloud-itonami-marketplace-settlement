@@ -219,3 +219,51 @@
     (is (empty? (store/refunds st "basket-1")))
     (is (nil? (store/acceptance st "basket-1")))
     (is (= [] (store/all-refunds st)))))
+
+(defn- topup! [st basket amount & {:keys [txid tops-up] :or {txid "psp-tx-2"}}]
+  (let [current (store/acceptance st basket)
+        t (accept/top-up-request current {:expires-at "2026-06-03T00:10:00Z"})]
+    (store/commit-record!
+     st {:op :record-payment-capture
+         :value {:order basket
+                 :request (cond-> t tops-up (assoc :accept/tops-up tops-up))
+                 :attestation (accept/psp-attestation
+                               {:psp "psp.test" :transaction-id txid
+                                :amount-minor amount :currency "JPY"
+                                :attested-at "2026-06-03T00:05:00Z" :source :webhook})}})
+    st))
+
+(defn- short-capture! [st basket amount]
+  (store/commit-record!
+   st {:op :record-payment-capture
+       :value {:order basket
+               :request (accept/payment-request
+                         {:order basket :rail :code-payment :mode :mpm-static
+                          :psp "psp.test"
+                          :expected-minor (:plan/buyer-charge-minor (store/plan-for st basket))
+                          :currency "JPY"})
+               :attestation (accept/psp-attestation
+                             {:psp "psp.test" :transaction-id "psp-tx-1"
+                              :amount-minor amount :currency "JPY"
+                              :attested-at "2026-06-02T00:05:00Z" :source :webhook})}})
+  st)
+
+(deftest a-second-capture-tops-the-first-up-instead-of-replacing-it
+  (testing "assoc-in alone would have erased the money the buyer already sent"
+    (let [st (short-capture! (store/seed-db) "basket-1" 550)]
+      (is (= 550 (:accept/captured-minor (store/acceptance st "basket-1"))))
+      (is (= 4000 (accept/shortfall-minor (store/acceptance st "basket-1"))))
+      (topup! st "basket-1" 4000)
+      (let [a (store/acceptance st "basket-1")]
+        (is (= 4550 (:accept/captured-minor a)) "the total, not the latest")
+        (is (= :settled (:status (accept/settlement-status a))))
+        (is (= ["psp-tx-1" "psp-tx-2"] (:accept/psp-transactions a)))))))
+
+(deftest a-second-capture-that-is-not-a-top-up-books-nothing
+  (let [st (short-capture! (store/seed-db) "basket-1" 550)]
+    (topup! st "basket-1" 4000 :tops-up "psp-tx-somewhere-else")
+    (is (= 550 (:accept/captured-minor (store/acceptance st "basket-1")))
+        "the first capture survives untouched")
+    (testing "and an amount that is not the shortfall is refused by the library"
+      (topup! st "basket-1" 1 :txid "psp-tx-3")
+      (is (= 550 (:accept/captured-minor (store/acceptance st "basket-1")))))))

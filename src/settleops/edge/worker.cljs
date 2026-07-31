@@ -8,18 +8,31 @@
   governor's allowlist has no op that transfers funds at all, and that
   is a permanent scope exclusion rather than an unimplemented feature.
 
-  Both money-shaped operations always escalate:
+  Every money-shaped operation always escalates:
 
     :bind-payout-destination  deciding where a seller's money goes is
                               the money-equivalent of issuing an
                               identity.
-    :propose-release          the moment funds actually leave.
+    :propose-release          the moment funds leave toward sellers.
+    :propose-refund           the moment they leave toward the buyer.
+    :record-payment-capture   writes the evidence the funds gate reads;
+                              an actor that could commit its own payment
+                              evidence could unlock its own release.
+
+  `POST /captures` records what an AUTHORISED HOST attests the PSP said.
+  It cannot verify a PSP signature -- there is no PSP client in this
+  fleet by design -- so the trust boundary is the CACAO on the request.
+  What the actor DOES check, before any human is asked, is that the
+  capture is one `marketplace.acceptance` would derive: never a
+  buyer-presented completion screen, never after the code expired, never
+  a bound-amount mismatch.
 
   Baskets come from the order actor's own projection
   (`marketplace.order/->basket-lines`) written into the shared ref, so a
   change to the order shape cannot silently alter a payout. Delivery is
   re-checked here independently rather than trusted from the plan."
-  (:require [marketplace.edge :as edge]
+  (:require [marketplace.acceptance :as accept]
+            [marketplace.edge :as edge]
             [settleops.advisor :as advisor]
             [settleops.governor :as governor]
             [settleops.phase :as phase]
@@ -36,7 +49,13 @@
                                             :value (:value proposal)
                                             ;; :payload is where an approver is
                                             ;; stamped; :value never carries one.
-                                            :payload (:value proposal)}))
+                                            ;; A refund that arrives without one
+                                            ;; books NOTHING (settleops.store) --
+                                            ;; money must not go back on nobody's
+                                            ;; authority.
+                                            :payload (assoc (:value proposal)
+                                                            :approved-by
+                                                            (:approved-by req))}))
    :ledger!     store/append-ledger!
    :hold-fact   governor/hold-fact})
 
@@ -51,7 +70,14 @@
     (fn [st]
       (edge/outcome ref (edge/run ops st (ctx body)
                                   {:op op :basket-id (get body "basket-id")
-                                   :ref ref :patch patch})))))
+                                   :ref ref
+                                   ;; Whoever the caller names as having approved
+                                   ;; this. Only reaches the store on a :commit,
+                                   ;; and the ops that move money never commit
+                                   ;; without passing through the escalation the
+                                   ;; governor forces.
+                                   :approved-by (get body "approved-by")
+                                   :patch patch})))))
 
 ;; ───────────────────────── operations ─────────────────────────
 
@@ -140,6 +166,77 @@
                                 :plan [(get b "basket-id")] :delivery :all :config :all}
                         b :propose-release {:escrow-id (get b "escrow-id")}
                         (get b "escrow-id"))))
+
+    ;; A PSP-attested capture. WHAT THIS ENDPOINT CAN AND CANNOT CHECK:
+    ;; `marketplace.acceptance` refuses a buyer-presented source, an expired
+    ;; code and a bound-amount mismatch, and the governor re-derives all of
+    ;; that before a human is asked. What it CANNOT do is verify a PSP
+    ;; signature -- there is no PSP client in this fleet by design
+    ;; (ADR-2607309500 D8). So this records what an AUTHORISED HOST attests
+    ;; the PSP said, and the trust boundary is the CACAO on the request, not
+    ;; the webhook. Say it out loud rather than let `:source "webhook"` read
+    ;; as cryptographic proof.
+    (and (= method "POST") (= path "/captures"))
+    (gated request env
+           (fn [b]
+             (let [bid (get b "basket-id")
+                   at (get b "attestation" {})]
+               (run client {:acceptance [bid] :plan [bid] :config :all}
+                    b :record-payment-capture
+                    {:request (accept/payment-request
+                               {:order bid
+                                :rail (keyword (get b "rail" "code-payment"))
+                                :mode (keyword (get b "mode" "mpm-dynamic"))
+                                :psp (get b "psp")
+                                :expected-minor (get b "expected-minor")
+                                :currency (get b "currency" "JPY")
+                                :expires-at (get b "expires-at")
+                                :reference (get b "reference")})
+                     :attestation (accept/psp-attestation
+                                   {:psp (get b "psp")
+                                    :transaction-id (get at "transaction-id")
+                                    :amount-minor (get at "amount-minor")
+                                    :currency (get at "currency" (get b "currency" "JPY"))
+                                    :attested-at (get at "attested-at")
+                                    :source (keyword (get at "source" "webhook"))})}
+                    bid))))
+
+    ;; A refund to the buyer. The instruction is NOT taken from the request:
+    ;; `settleops.store` derives it from the stored capture plus the
+    ;; approver's name, so an unattributed refund books nothing at all.
+    ;; Escrows are prefetched because the refusals that matter -- already
+    ;; released, disputed -- are facts about them.
+    (and (= method "POST") (= path "/refunds"))
+    (gated request env
+           (fn [b]
+             (let [bid (get b "basket-id")]
+               (run client {:acceptance [bid] :escrow :all :config :all}
+                    b :propose-refund
+                    {:order bid
+                     :amount-minor (get b "amount-minor")
+                     :reason (get b "reason")
+                     :requested-at (get b "requested-at" (get b "now"))}
+                    bid))))
+
+    (and (= method "GET") (= path "/acceptances"))
+    (if-not (edge/authorised? request env)
+      (js/Promise.resolve (edge/json {:error "unauthorised"} 401))
+      (-> (edge/read-all client :acceptance)
+          (.then (fn [as]
+                   (edge/json
+                    {:acceptances
+                     (mapv (fn [a] {:order (:accept/order a)
+                                    :state (str (:accept/state a))
+                                    :expected-minor (:accept/expected-minor a)
+                                    ;; The NET figure, because that is what the
+                                    ;; funds gate stands on -- showing the gross
+                                    ;; capture next to a refunded order would
+                                    ;; read as money the operator still holds.
+                                    :net-captured-minor (accept/net-captured-minor a)
+                                    :refunded-minor (accept/refunded-minor a)
+                                    :status (name (:status (accept/settlement-status a)))})
+                           as)}
+                    200)))))
 
     (and (= method "GET") (= path "/escrows"))
     (if-not (edge/authorised? request env)

@@ -13,7 +13,7 @@
         ;; it does not reimplement it.
         io.github.kotoba-lang/marketplace
         {:git/url "https://github.com/kotoba-lang/marketplace.git"
-         :git/sha "57fc7b3aedcc7d0c6ffb48ac9d4fff1bdf4c6e78"}
+         :git/sha "7ed9642f924f3cd01aa670d48d6cf56215d1b132"}
         ;; HOST half only (`settleops.edge.worker`): q / pull / datoms / transact
         ;; against kotobase.net with a per-request CACAO. The actor core
         ;; stays portable .cljc with no network I/O.
