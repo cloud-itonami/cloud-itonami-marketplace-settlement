@@ -46,7 +46,7 @@
   operator opt-in (see that namespace).
 
   Pure: no clock, no network, no randomness."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]))
 
