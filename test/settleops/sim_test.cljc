@@ -8,7 +8,7 @@
   properly in `governor-test` / `operation-graph-test`; what this catches
   is the demo itself rotting (a renamed key, a graph that no longer
   compiles) while the unit tests stay green."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [settleops.sim :as sim]))
 

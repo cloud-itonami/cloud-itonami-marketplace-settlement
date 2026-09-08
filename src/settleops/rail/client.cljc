@@ -33,7 +33,7 @@
   Portable `.cljc`: request/response are plain maps, so the same code
   runs under a Cloudflare Worker `fetch`, an HTTP client on the JVM, or
   a stub in tests."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [settleops.rail :as rail]))
 
 ;; ───────────────────────────── x402 (read-only) ─────────────────────────────
@@ -112,7 +112,7 @@
                               (str "mp-" (:instruction/escrow i) "-" (:instruction/seller i))))
      :body    (form-encode
                {:amount (:instruction/amount-minor i)
-                :currency (str/lower-case (str (:instruction/currency i)))
+                :currency (str/lower (str (:instruction/currency i)))
                 :destination (:instruction/to i)
                 :transfer_group (:instruction/escrow i)})}))
 

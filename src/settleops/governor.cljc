@@ -93,7 +93,7 @@
       the five may EVER become auto-commit-eligible; `settleops.phase`
       keeps all five out of every phase's `:auto` set independently --
       two layers, not one."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]
             [settleops.rail :as rail]
@@ -425,7 +425,7 @@
       :detail (str ":effect は :propose のみ許可されるが " (pr-str (:effect proposal)) " が提案された")}]))
 
 (defn- text-blob [proposal]
-  (str/lower-case (pr-str (select-keys proposal [:op :summary :rationale :cites :value]))))
+  (str/lower (pr-str (select-keys proposal [:op :summary :rationale :cites :value]))))
 
 (defn- scope-exclusion-violations [proposal]
   (let [op (:op proposal)
