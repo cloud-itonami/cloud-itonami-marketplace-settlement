@@ -4,7 +4,7 @@
 ;;
 ;; CLAUDE.md's runtime priority puts ClojureScript above the JVM and every
 ;; namespace here except `settleops.edge.worker` is `.cljc` -- but the only
-;; thing that had ever run the suite was `clojure -M:test`, so "portable"
+;; thing that had ever run the suite was `kbb -M:test`, so "portable"
 ;; was an assertion nobody checked. `npm run test:cljs` checks it.
 {:deps {:aliases [:cljs-test]}
  :builds

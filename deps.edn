@@ -30,7 +30,7 @@
   ;; io.github.com-junkawasaki/langchain-clj. langgraph declares the same
   ;; library as io.github.kotoba-lang/langchain, so the entry matched no
   ;; node in the resolved tree and never reached the classpath -- verified
-  ;; with `clojure -Stree`/-Spath, unchanged before and after removal.
+  ;; with `kbb -Stree`/-Spath, unchanged before and after removal.
   :dev {}
   :run {:main-opts ["-m" "settleops.sim"]}
   :test {:extra-paths ["test"]
@@ -42,7 +42,7 @@
                       thheller/shadow-cljs {:mvn/version "2.28.20"}}}
   ;; What `shadow-cljs.edn` resolves: the :cljs deps plus the test path, so
   ;; the same portable suite runs under a ClojureScript host. Kept separate
-  ;; from :test because shadow-cljs passes the alias to `clojure -A`, where
+  ;; from :test because shadow-cljs passes the alias to `kbb -A`, where
   ;; that alias's :main-opts reach the wrong main and the build dies.
   :cljs-test {:extra-paths ["test"]
               :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}

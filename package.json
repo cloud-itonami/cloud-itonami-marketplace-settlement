@@ -1,9 +1,9 @@
 {
   "private": true,
   "scripts": {
-    "build": "shadow-cljs release worker",
+    "build": "amu compile --target wasm32-browser worker",
     "deploy": "npm run build && wrangler deploy",
-    "test:cljs": "shadow-cljs compile test && node out/node-tests.js"
+    "test:cljs": "amu compile --target wasm32-browser test && node out/node-tests.js"
   },
   "devDependencies": {
     "@noble/hashes": "^2.2.0",

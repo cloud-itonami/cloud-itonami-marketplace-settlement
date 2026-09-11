@@ -1,5 +1,5 @@
 (ns settleops.sim-test
-  "A smoke test for the offline demo (`clojure -M:dev:run`). It asserts
+  "A smoke test for the offline demo (`kbb -M:dev:run`). It asserts
   what the demo CLAIMS: that it runs with no network and no keys, that an
   unverified payout destination stops a basket, and that the escrow only
   reaches `:released` after a named human approves.
