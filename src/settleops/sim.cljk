@@ -3,7 +3,7 @@
   payout destination block a basket, watch a release refused because
   nobody recorded that the buyer paid, record a PSP-attested capture and
   watch the release wait for a human, then watch a refund refused because
-  the money already went to the sellers. `clojure -M:dev:run`."
+  the money already went to the sellers. `kbb -M:dev:run`."
   (:require [langgraph.graph :as g]
             [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]

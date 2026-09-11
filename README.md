@@ -226,11 +226,11 @@ Every test injects a recording stub. **No transfer has been executed
 from this repository.**
 
 ```bash
-clojure -M:dev:run   # split, unverified destination, the funds gate, human-gated
+kbb -M:dev:run   # split, unverified destination, the funds gate, human-gated
                      # release, and a refund refused after that release
-clojure -M:test      # JVM — 126 tests, 489 assertions
+kbb -M:test      # JVM — 126 tests, 489 assertions
 npm ci && npm run test:cljs   # ClojureScript on Node — the SAME 126 / 489
-clojure -M:lint
+kbb -M:lint
 ```
 
 Every namespace except `settleops.edge.worker` is `.cljc`, and CLAUDE.md's
