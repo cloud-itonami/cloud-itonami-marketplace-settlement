@@ -13,5 +13,5 @@
     "@ipld/dag-cbor": "^9.2.1"
   },
   "name": "cloud-itonami-marketplace-settlement",
-  "comment": "shadow-cljs compiles src/settleops/edge/worker.cljs -> dist/worker.js."
+  "comment": "shadow-cljs compiles src/settleops/edge/worker.cljk -> dist/worker.js."
 }
