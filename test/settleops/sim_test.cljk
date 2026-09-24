@@ -9,7 +9,7 @@
   is the demo itself rotting (a renamed key, a graph that no longer
   compiles) while the unit tests stay green."
   (:require [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is testing]]
+            [kotoba.test :refer [deftest is testing]]
             [settleops.sim :as sim]))
 
 (deftest the-offline-demo-runs-and-tells-the-truth

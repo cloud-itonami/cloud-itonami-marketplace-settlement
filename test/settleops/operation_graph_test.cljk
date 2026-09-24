@@ -5,7 +5,7 @@
   The headline tests are the two money moments:
   `release-can-only-be-authorised-by-a-human` and
   `binding-a-payout-destination-can-only-be-authorised-by-a-human`."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [langgraph.graph :as g]
             [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]

@@ -2,7 +2,7 @@
   "The rollout gate. The test that matters most is the LAST one: the three
   money-deciding ops must be absent from every phase's `:auto` set,
   including phase 3, forever."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [settleops.governor :as governor]
             [settleops.phase :as phase]))
 
