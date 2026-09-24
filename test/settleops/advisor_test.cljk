@@ -2,7 +2,7 @@
   "The advisor is smart-but-untrusted. These tests pin the two properties
   the governor's own tests assume: every proposal is `:propose`-only, and
   the ARITHMETIC is not the advisor's opinion."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [marketplace.acceptance :as accept]
             [settleops.advisor :as advisor]
             [settleops.governor :as governor]

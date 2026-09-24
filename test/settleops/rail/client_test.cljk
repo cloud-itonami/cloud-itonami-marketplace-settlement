@@ -7,7 +7,7 @@
 
   Nothing here reaches the network: every `http` is a stub, and the
   read-only functions take a body that was handed to them."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [settleops.rail.client :as client]))
 
 ;; ───────────────────────── x402 read request ─────────────────────────

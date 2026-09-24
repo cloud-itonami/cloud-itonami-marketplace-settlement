@@ -4,3 +4,4 @@ dist-actor/
 .shadow-cljs/
 .cpcache/
 out/
+.nbb/

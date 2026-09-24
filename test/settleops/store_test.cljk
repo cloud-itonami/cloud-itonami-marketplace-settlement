@@ -3,7 +3,7 @@
   `a-release-is-attributed-from-the-payload-not-the-proposal`: reading the
   approver from `:value` would silently record every release as
   unattributed, which is exactly what the audit ledger exists to prevent."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]
             [settleops.store :as store]))

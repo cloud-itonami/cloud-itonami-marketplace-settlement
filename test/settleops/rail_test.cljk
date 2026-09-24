@@ -1,7 +1,7 @@
 (ns settleops.rail-test
   "The rail adapter. Every HTTP call in these tests goes to a recording
   stub — nothing here has ever reached a real rail."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [marketplace.acceptance :as accept]
             [marketplace.settlement :as settle]
             [settleops.rail :as rail]
