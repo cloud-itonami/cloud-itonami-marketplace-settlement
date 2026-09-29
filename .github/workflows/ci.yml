@@ -34,7 +34,7 @@ jobs:
       - name: test
         run: clojure -M:test
 
-  # The same portable .cljc suite under a real ClojureScript host. CLAUDE.md's
+  # The same portable .cljc suite under a real ClojureScript host. AGENTS.md's
   # runtime priority puts cljs above the JVM, and until this existed
   # "portable" was an assertion nobody checked.
   #
