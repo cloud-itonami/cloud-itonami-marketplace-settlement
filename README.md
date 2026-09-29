@@ -233,7 +233,7 @@ npm ci && npm run test:cljs   # ClojureScript on Node — the SAME 126 / 489
 kbb -M:lint
 ```
 
-Every namespace except `settleops.edge.worker` is `.cljc`, and CLAUDE.md's
+Every namespace except `settleops.edge.worker` is `.cljc`, and AGENTS.md's
 runtime priority puts ClojureScript above the JVM — so the suite runs on
 both rather than asserting portability. `governor_test` was `.clj` and is
 now `.cljc` for that reason: it is the namespace whose refusals matter
